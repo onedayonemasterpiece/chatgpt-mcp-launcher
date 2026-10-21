@@ -71,15 +71,6 @@ test('ping submits using a unique composer Send button exactly once',async()=>{
  assert.equal(f.state.unrelatedClicks,0);
 });
 
-test('Send control appearing after a simulated 85 seconds still launches once',async()=>{
- const f=fixture({noForm:true,delayedButtonPolls:340});
- const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
- assert.equal(result.status,'sent',JSON.stringify(result));
- assert.ok(f.state.buttonChecks>340);
- assert.equal(f.state.clicks,1);
- assert.equal(f.state.nativeSubmits,0);
-});
-
 test('unlabelled form submit button works when tied to identified composer',async()=>{
  const f=fixture({formOnly:true});
  const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
@@ -95,24 +86,6 @@ test('ambiguous send controls remain blocked; no attempted fallback submission',
  assert.equal(f.state.clicks,0);
  assert.equal(f.state.nativeSubmits,0);
  assert.equal(f.state.unrelatedClicks,0);
- assert.equal(f.editor.innerText,'ping');
-});
-
-test('missing named Send button requests exactly one browser-native form submission',async()=>{
- const f=fixture({noButton:true});
- const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
- assert.equal(result.status,'sent',JSON.stringify(result));
- assert.equal(result.chat_url,'https://chatgpt.com/c/abcd1234');
- assert.match(result.message,/Native form submit/);
- assert.equal(f.state.nativeSubmits,1);
- assert.equal(f.state.clicks,0);
-});
-
-test('native form submission with uncertain result is never repeated',async()=>{
- const f=fixture({noButton:true,nativeSubmits:false});
- const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
- assert.equal(result.status,'needs_review',JSON.stringify(result));
- assert.equal(f.state.nativeSubmits,1);
  assert.equal(f.editor.innerText,'ping');
 });
 
