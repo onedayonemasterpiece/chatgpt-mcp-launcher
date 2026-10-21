@@ -188,6 +188,9 @@
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
     if (draftText(input).trim()) return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
+    // Never reload or interrupt: if ChatGPT is still answering here, wait for it.
+    for (let i=0;i<360 && replyInProgress();i++) await sleep(500);
+    if (replyInProgress()) return {status:'blocked',message:'ChatGPT was still answering in this conversation after 3 minutes; nothing was sent, try again later'};
     // A launch matters more than the effort level: ChatGPT keeps the last
     // selected level, so a picker that cannot be verified never blocks the send.
     const effortResult=await setEffort(job.effort || 'auto');
@@ -262,8 +265,4 @@
   }
   globalThis.chatGPTLauncherRun = run;
   globalThis.chatGPTLauncherRead = read;
-  globalThis.chatGPTLauncherProbe = () => {
-    const el=composer();
-    return {draft:!!(el && draftText(el).trim()),generating:replyInProgress()};
-  };
 })();

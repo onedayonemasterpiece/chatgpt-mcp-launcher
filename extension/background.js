@@ -182,20 +182,10 @@ async function openChatTab(job,{fresh=false}={}) {
   }
   return chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
 }
-async function reloadTab(tabId) {
-  await chrome.tabs.reload(tabId);
-  // Wait until the reload has actually started before waiting for it to finish.
-  for(let i=0;i<50;i++) {
-    if((await chrome.tabs.get(tabId)).status!=='complete') break;
-    await new Promise(r=>setTimeout(r,200));
-  }
-  await awaitTab(tabId);
-}
 async function runDriver(script,tab,payload) {
   await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
   const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
-    func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
-      payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+    func:async payload=>payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
       globalThis.chatGPTLauncherRun(payload),args:[payload]});
   return result;
 }
@@ -208,13 +198,6 @@ async function execute(job) {
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
   const script=BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
-  if(tab.reused && job.action!=='start') {
-    // A tab opened long ago can show an old state of the conversation; sending
-    // from it could branch from an old message. Reload it first, unless it holds
-    // an unsent draft or ChatGPT is writing there right now (then it is live).
-    const probe=(await runDriver(script,tab,{action:'probe'}))?.result;
-    if(probe && !probe.draft && !probe.generating) await reloadTab(tab.id);
-  }
   let result=await runDriver(script,tab,{...job,prompt});
   if(job.action==='start' && result?.result?.reason==='draft') {
     // A reused "New chat" tab holds someone's unsent draft; nothing was typed

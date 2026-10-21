@@ -6,7 +6,7 @@
 - Browser automation is fragile, so it does as few fragile steps as possible. No tab tracking and no progress reporting during a job.
 - A missed launch is worse than running on a different effort level. ChatGPT remembers the last selected level, so by default the launcher **does not touch the effort picker** (`effort: auto`). An explicitly requested level is tried once; if it cannot be selected or verified, the prompt is still sent and the job message says so.
 - Submitting a prompt: one submission only (see the page driver), never twice after an uncertain outcome.
-- A conversation tab opened long ago may show an old state (sending from it could branch from an old message), so before continue/read it is reloaded, unless it holds an unsent draft or ChatGPT is writing there right now.
+- The launcher never reloads a ChatGPT tab (a reload in the middle of an answer can leave the page stuck). If ChatGPT is still answering in the conversation, continue waits up to 3 minutes for the answer to end; otherwise the job is `blocked` with nothing sent.
 - An already open tab is reused: the same conversation for continue/open/read, an empty "New chat" page for start. If that page holds someone's unsent draft, nothing is typed there and the new chat starts in a fresh tab.
 - The launcher sits in dot's chain of helpers, so it must be able to confirm a result: `chatgpt_read_reply` returns the text of the last ChatGPT reply (text, not screenshots: a screenshot permission would make Chrome disable the extension until the owner re-approves it).
 

@@ -58,8 +58,8 @@ test('continue reuses matching open ChatGPT conversation and focuses its window'
   assert.deepEqual(f.calls.created,[]);
   assert.deepEqual(f.calls.updated,[{id:21,active:true}]);
   assert.deepEqual(f.calls.windows,[{id:1,focused:true}]);
-  assert.deepEqual(f.calls.reloads,[21],'a long-open conversation tab is refreshed before sending');
-  assert.deepEqual(f.calls.injections,[21,21,21,21]);
+  assert.deepEqual(f.calls.reloads,[],'never reload: it can leave ChatGPT stuck mid-answer');
+  assert.deepEqual(f.calls.injections,[21,21]);
 });
 
 test('continue opens target conversation without navigating an unrelated open chat',async()=>{
@@ -151,14 +151,6 @@ test('read reuses the conversation tab and passes the reply through',async()=>{
   assert.equal(result.reply_text,'PONG');
   assert.equal(result.reply_generating,false);
   assert.deepEqual(f.calls.created,[]);
-});
-
-test('a reused tab with an unsent draft or a reply in progress is not reloaded',async()=>{
-  for(const probe of [{draft:true,generating:false},{draft:false,generating:true}]) {
-    const f=fixture([{id:34,url:CHAT}],{probe});
-    await f.execute({action:'continue',chat_url:CHAT,prompt:'Continue the work',effort:'auto'});
-    assert.deepEqual(f.calls.reloads,[],JSON.stringify(probe));
-  }
 });
 
 test('open-only never reloads or probes the tab',async()=>{
