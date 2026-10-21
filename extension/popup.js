@@ -113,7 +113,7 @@ $('updateNow').addEventListener('click',()=>{
   status('Запрашиваю проверку обновлений. Если Chrome спросит разрешение открыть приложение Windows, подтвердите.');
   // Only poll one tiny local JSON status file while THIS popup stays open.
   // Reopening the popup later also shows the latest terminal result.
-  manualUpdateTimer=setInterval(()=>{void watchManualUpdate();},1200);
+  manualUpdateTimer=setInterval(()=>watchManualUpdate(),1200);
 });
 $('refresh').addEventListener('click',async()=>{
   try {await showVersion();} catch(err) {status('Ошибка: '+err.message);}
