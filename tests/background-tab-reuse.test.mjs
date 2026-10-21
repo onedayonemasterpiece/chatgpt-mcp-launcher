@@ -22,7 +22,7 @@ function fixture(openTabs=[],opts={}) {
       update:async(id,params)=>{calls.updated.push({id,...params});return tabs.get(id);},
       get:async(id)=>{
         const tab=tabs.get(id);
-        if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading'};
+        if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading',...(opts.loadingUrl!==undefined?{url:opts.loadingUrl}:{})};
         return {...tab,status:'complete'};
       },
       create:async(params)=>{
@@ -103,5 +103,16 @@ test('start continues to create a new chat',async()=>{
 test('slow ChatGPT tab still loads after a simulated 70-second navigation',async()=>{
   const f=fixture([{id:50,url:CHAT,status:'loading'}],{slowLoadReads:350,instantTimers:true});
   await f.awaitTab(50);
-  assert.ok(f.getReads()>350,'must wait past the old 10-second window');
+  assert.ok(f.getReads()>50,'must wait past the old 10-second window');
+});
+
+test('a ChatGPT page that never finishes loading still proceeds after 30 seconds',async()=>{
+  const f=fixture([{id:51,url:CHAT,status:'loading'}],{slowLoadReads:10_000,instantTimers:true});
+  await f.awaitTab(51);
+  assert.ok(f.getReads()>150 && f.getReads()<200,'goes on once the chatgpt.com page is committed');
+});
+
+test('a tab that never reaches chatgpt.com fails after 90 seconds',async()=>{
+  const f=fixture([{id:52,url:'about:blank',status:'loading'}],{slowLoadReads:10_000,instantTimers:true,loadingUrl:'about:blank'});
+  await assert.rejects(()=>f.awaitTab(52),/did not open within 90 seconds/);
 });
