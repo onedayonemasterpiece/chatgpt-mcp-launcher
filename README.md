@@ -1,6 +1,6 @@
 # ChatGPT MCP Launcher
 
-Public Chrome MV3 extension, protected MCP relay and lightweight Windows updater. It opens or continues **existing ChatGPT conversations** in the user's authenticated Chrome. It does not read model responses or copy browser cookies.
+Public Chrome MV3 extension, protected MCP relay and lightweight Windows updater. It opens or continues **existing ChatGPT conversations** in the user's authenticated Chrome. It never copies browser cookies. Results come from ChatGPT itself: every prompt asks the conversation to report back through the launcher app (`chatgpt_report`); the last reply can also be read on an explicit `chatgpt_read_reply` call. MCP workflow and owner decisions: [docs/multiagent-resume-20261021.md](docs/multiagent-resume-20261021.md).
 
 ## Windows: one-time installation
 
