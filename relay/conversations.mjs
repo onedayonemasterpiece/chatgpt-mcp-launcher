@@ -28,9 +28,12 @@ export function referenceToUrl(reference,chats=[],jobs=[]) {
   const url=canonicalChatUrl(ref);
   if(url) return url;
   const job=jobs.find(j=>j.id===ref);
-  if(job) return canonicalChatUrl(job.result_chat_url||job.observed_chat_url);
-  const known=chats.find(c=>c.chat_id===ref || c.chat_url===ref);
+  const fromJob=canonicalChatUrl(job?.result_chat_url);
+  if(fromJob) return fromJob;
+  // The registry keeps job IDs after old jobs are pruned from the queue.
+  const known=chats.find(c=>[c.chat_id,c.source_job_id,c.last_job_id].includes(ref));
   if(known) return canonicalChatUrl(known.chat_url);
+  if(job) return null; // a known job that never reached a conversation
   // A caller with an exact bare slug may open it, but existence is not assumed.
   if(ID.test(ref)) return 'https://chatgpt.com/c/'+ref;
   return null;

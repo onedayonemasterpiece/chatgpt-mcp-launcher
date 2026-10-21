@@ -173,45 +173,14 @@ async function openChatTab(job) {
   }
   return chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
 }
-async function noteProgress(config,job,phase) {
-  if(!config||!job?.id)return;
-  // No page text, screenshot, prompt or cookies leave the extension.
-  await relayFetch(config,'POST','/device/report',{type:'progress',job_id:job.id,phase});
-}
-async function trackChatTab(config,job,tab) {
-  if(!config||!job?.id||!Number.isInteger(tab?.id))return;
-  const {trackedChatTabs}=await api.get('trackedChatTabs');
-  const map=trackedChatTabs&&typeof trackedChatTabs==='object'?trackedChatTabs:{};
-  map[String(tab.id)]={job_id:job.id,action:job.action,
-    expected_chat_url:job.chat_url||null,observed_url:null,created_at:Date.now()};
-  const keys=Object.keys(map);
-  if(keys.length>50) for(const key of keys.slice(0,keys.length-50))delete map[key];
-  await api.set({trackedChatTabs:map});
-}
-async function observeChatTab(tabId,changes,tab) {
-  const url=changes?.url||tab?.url;
-  if(!validChatUrl(url))return;
-  const {trackedChatTabs,config}=await api.get(['trackedChatTabs','config']);
-  if(!config?.token||!trackedChatTabs)return;
-  const entry=trackedChatTabs[String(tabId)];
-  if(!entry||entry.observed_url===url)return;
-  if(entry.expected_chat_url&&!sameConversationUrl(entry.expected_chat_url,url))return;
-  await relayFetch(config,'POST','/device/report',{type:'chat_seen',job_id:entry.job_id,chat_url:url});
-  entry.observed_url=url;
-  await api.set({trackedChatTabs});
-}
-async function execute(job,config=null) {
+async function execute(job) {
   if(!['start','continue','open'].includes(job.action))throw Error('Unsupported browser action');
   const prompt=job.action==='open'?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
-  await noteProgress(config,job,'opening');
   const tab=await openChatTab(job);
-  await trackChatTab(config,job,tab);
-  await noteProgress(config,job,'loading');
   await awaitTab(tab.id);
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
-  await noteProgress(config,job,'waiting_composer');
   const script=BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
   await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
   const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
@@ -224,7 +193,15 @@ async function flushPending(config) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
   const {job_id,status,chat_url,message}=pendingReport;
-  await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message});
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message});}
+  catch(err) {
+    // A report the relay refuses outright would be resent forever and block
+    // heartbeats and every later job. Network errors and 401 stay pending.
+    if(!/^Relay HTTP 400:/.test(err.message)) throw err;
+    await api.set({pendingReport:null,lastResult:{job_id,status,chat_url,message,
+      rejected:String(err.message).slice(0,200),at:new Date().toISOString()}});
+    return;
+  }
   await api.set({pendingReport:null,lastResult:{job_id,status,chat_url,message,at:new Date().toISOString()}});
 }
 async function sendHeartbeat(config) {
@@ -264,7 +241,7 @@ async function poll() {
     await api.set({pendingReport:{job_id:job.id,status:'needs_review',
       message:'Browser action interrupted; verify before retrying'}});
     let result;
-    try {result=await execute(job,config);}
+    try {result=await execute(job);}
     catch(err) {result={status:'needs_review',
       message:'Automation failed or was interrupted: '+err.message+'. Check the tab before retrying.'};}
     await api.set({pendingReport:{job_id:job.id,...result}});
@@ -277,9 +254,6 @@ async function poll() {
 }
 chrome.runtime.onInstalled.addListener(()=>{void setAlarm();void armDevReload();void poll();});
 chrome.runtime.onStartup.addListener(()=>{void setAlarm();void armDevReload();void poll();});
-chrome.tabs?.onUpdated?.addListener?.((id,changes,tab)=>{
-  void observeChatTab(id,changes,tab).catch(()=>{/* Metadata observation is best effort */});
-});
 chrome.alarms.onAlarm.addListener(alarm=>{
   if(alarm.name===ALARM) void poll();
   if(alarm.name===REVISION_ALARM) void checkDevReload();

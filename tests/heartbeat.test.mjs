@@ -32,7 +32,7 @@ test('device heartbeat tracks loaded vs installed SHA independently and disabled
     type:'heartbeat',schema_version:1,active_revision:REV,installed_revision:INSTALLED,
     manifest_version:'0.2.0',commands_enabled:false,runtime_integrity:'ok',
     runtime_loaded_at:'2026-10-21T11:30:00Z',
-    updater:{state:'error',checked_at:'2026-10-21T11:32:00Z',error_code:'git_auth_failed'},
+    updater:{state:'error',checked_at:'2026-10-21T11:32:00Z',error_code:'git_auth_failed',trigger:'manual'},
   };
   let out=await request('/device/report','POST',heartbeat);
   assert.equal(out.status,200);
@@ -46,6 +46,7 @@ test('device heartbeat tracks loaded vs installed SHA independently and disabled
   assert.equal(status.manifest_version,'0.2.0');
   assert.equal(status.commands_enabled,false);
   assert.equal(status.updater_error,'git_auth_failed');
+  assert.equal(status.updater_trigger,'manual');
   out=await request('/device/poll');
   assert.equal(out.status,200);
   assert.equal(out.data.job,null);
@@ -56,9 +57,10 @@ test('device heartbeat tracks loaded vs installed SHA independently and disabled
   assert.equal(status.active_revision,REV);
   out=await request('/device/report','POST',{
     ...heartbeat,commands_enabled:true,installed_revision:REV,
-    updater:{state:'current',checked_at:'2026-10-21T11:35:00Z'},
+    updater:{state:'current',checked_at:'2026-10-21T11:35:00Z',trigger:'scheduled'},
   });
   assert.equal(out.status,200);
+  assert.equal(queue.deviceStatus('desktop').updater_trigger,'scheduled');
   out=await request('/device/poll');
   assert.equal(out.data.job.id,job.id);
   assert.equal(queue.status(job.id).status,'claimed');
