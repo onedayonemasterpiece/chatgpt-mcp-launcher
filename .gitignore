@@ -1,0 +1,9 @@
+node_modules/
+*.log
+extension/build-info.js
+extension/dev-revision.json
+extension/dev-revision.*.tmp
+extension/updater-status.json
+extension/updater-status.*.tmp
+extension/page-driver-*.js
+extension/page-driver-*.tmp

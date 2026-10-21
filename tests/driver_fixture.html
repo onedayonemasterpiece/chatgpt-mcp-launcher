@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:system-ui}button{padding:10px;margin:5px}#composer{border:1px solid;padding:12px;min-width:300px;min-height:24px}</style></head><body>
+<div id="app">
+  <button id="model" aria-label="Выбрать модель ChatGPT">Уровень усилий рассуждения Очень высокий</button>
+  <div id="choices" style="display:none"><button id="medium">Средний</button><button id="high">Высокий</button><button id="xhigh">Очень высокий</button></div>
+  <div id="thread"></div>
+  <div id="composer" contenteditable="true" aria-label="Спросить ChatGPT"></div>
+  <button id="send" data-testid="send-button">Отправить</button>
+</div>
+<script>
+window.sentCount=0;
+const c=document.getElementById('choices');
+document.getElementById('model').onclick=()=>{c.style.display=c.style.display==='none'?'block':'none';};
+for(const key of ['medium','high','xhigh']) {
+ document.getElementById(key).onclick=()=>{
+  const name=document.getElementById(key).textContent;
+  document.getElementById('model').textContent='Уровень усилий рассуждения '+name;
+  c.style.display='none';
+ }
+}
+document.getElementById('send').onclick=()=>{
+ const input=document.getElementById('composer');
+ if(!input.textContent.trim())return;
+ const p=document.createElement('p');p.dataset.role='user';p.textContent=input.innerText;
+ document.getElementById('thread').appendChild(p);
+ input.textContent='';
+ window.sentCount++;
+ if(window.location.pathname==='/') history.pushState({},'', '/c/aabb1234');
+};
+</script></body></html>
