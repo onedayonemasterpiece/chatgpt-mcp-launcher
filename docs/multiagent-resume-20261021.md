@@ -12,7 +12,7 @@
 
 ## Result reporting by ChatGPT itself
 
-Owner decision (21 October 2026): results are not read from the screen. To make the app available to the conversation, the extension types it like a person: after the prompt, on a new line `@Chatgpt task lancher`, waits 7 s for the app picker, types a space to pick it, then submits. Every prompt that Chrome sends ends with a short service note asking the ChatGPT conversation to call the same app's `chatgpt_report(job_id, status)`: `started` as soon as it begins, then `done` with a short `summary` (or `failed` with the reason). `chatgpt_task_status` shows `model_status`, `model_summary` and times. A `started` report proves delivery, so it turns `needs_review` into `sent`. `chatgpt_read_reply` remains only as a fallback.
+Owner decision (21 October 2026): results are not read from the screen. To make the app available to the conversation, the extension acts like a person: 2 s after the prompt it puts the caret at the end, pastes `@Chatgpt task lancher` as a separate line, waits 7 s for the app picker, then with the caret at the end presses space to pick the app, and only then submits. Every prompt that Chrome sends ends with a short service note asking the ChatGPT conversation to call the same app's `chatgpt_report(job_id, status)`: `started` as soon as it begins, then `done` with a short `summary` (or `failed` with the reason). `chatgpt_task_status` shows `model_status`, `model_summary` and times. A `started` report proves delivery, so it turns `needs_review` into `sent`. `chatgpt_read_reply` remains only as a fallback.
 
 ## MCP tools
 
