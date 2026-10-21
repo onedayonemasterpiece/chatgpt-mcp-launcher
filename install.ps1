@@ -26,6 +26,8 @@ $mutex = $null
 $lockHeld = $false
 $workspace = $null
 $targetRevision = $null
+$checkId = [guid]::NewGuid().ToString('N')
+$checkStartedAt = [DateTime]::UtcNow.ToString('o')
 
 function Read-Json([string]$Path) {
   if(!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -63,7 +65,9 @@ function Report-Status([string]$State,[string]$ErrorCode='') {
   $rev = if($null -ne $current) { $current.revision } else { $null }
   $record = [ordered]@{
     schema_version = 1
-    checked_at = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    checked_at = [DateTime]::UtcNow.ToString('o')
+    check_id = $checkId
+    started_at = $checkStartedAt
     state = $State
     installed_revision = $rev
     source_revision = $targetRevision
@@ -94,16 +98,35 @@ function Install-Schedule {
 function Install-UpdateProtocol {
   if(!(Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'update_handler_missing' }
   $base = 'Registry::HKEY_CURRENT_USER\Software\Classes\' + $protocolName
-  New-Item -Path $base -Force | Out-Null
-  Set-Item -Path $base -Value 'URL:ChatGPT MCP Launcher update'
-  New-ItemProperty -Path $base -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
   $cmdKey = $base + '\shell\open\command'
-  New-Item -Path $cmdKey -Force | Out-Null
+  $vbsPath = Join-Path $Root 'launch-update.vbs'
+  $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
   $powershell = Join-Path $PSHOME 'powershell.exe'
-  $launch = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Check'
-  # No untrusted URL argument is accepted. The handler does ONE fixed update check.
-  Set-Item -Path $cmdKey -Value $launch
-  Write-Host 'Chrome update button handler registered for current Windows user.'
+  foreach($path in @($vbsPath,$updater,$Root,$powershell)) {
+    if($path -match '["`r`n]') { throw 'invalid_launcher_path' }
+  }
+  $arguments = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Check -Root "' + $Root + '"'
+  $vbs = 'Set sh = CreateObject("WScript.Shell")' + [Environment]::NewLine +
+    'sh.Run "' + $arguments.Replace('"','""') + '", 0, False' + [Environment]::NewLine
+  $existing = if(Test-Path -LiteralPath $vbsPath) {[System.IO.File]::ReadAllText($vbsPath)} else {$null}
+  if($existing -cne $vbs) {
+    $temp = $vbsPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+      [System.IO.File]::WriteAllText($temp,$vbs,[System.Text.Encoding]::Unicode)
+      Move-Item -LiteralPath $temp -Destination $vbsPath -Force
+    } finally { if(Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
+  }
+  $launch = '"' + $wscript + '" //B //NoLogo "' + $vbsPath + '"'
+  New-Item -Path $base -Force | Out-Null
+  if((Get-Item $base).GetValue('') -cne 'URL:ChatGPT MCP Launcher update') {
+    Set-Item -Path $base -Value 'URL:ChatGPT MCP Launcher update'
+  }
+  if((Get-Item $base).GetValue('URL Protocol') -ne '') {
+    New-ItemProperty -Path $base -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+  }
+  New-Item -Path $cmdKey -Force | Out-Null
+  if((Get-Item $cmdKey).GetValue('') -cne $launch) { Set-Item -Path $cmdKey -Value $launch }
+  if($Install) { Write-Host 'Silent update button handler installed (no visible PowerShell console).' }
 }
 function Latest-Revision {
   $api = 'https://api.github.com/repos/'+$repo+'/commits/main'
@@ -132,13 +155,14 @@ try {
   $lockHeld = $mutex.WaitOne(0)
   if(!$lockHeld) { Write-Host 'Another updater check is already running.'; exit 0 }
 
-  # Small authenticated-independent public GitHub SHA check; 15-minute schedule.
+  # Report progress immediately, including when no archive download is needed.
+  Report-Status 'checking'
+  # Small independent public GitHub SHA check every 15 minutes or by button.
   $targetRevision = Latest-Revision
   if(Is-Installed $targetRevision) {
     Report-Status 'current'
     Write-Host ('Already current: '+$targetRevision)
   } else {
-    Report-Status 'checking'
     $workspace = Join-Path $env:TEMP ('chatgpt-mcp-launcher-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $workspace -Force | Out-Null
     $zipPath = Join-Path $workspace 'source.zip'
@@ -203,10 +227,12 @@ try {
     Report-Status 'updated'
     Write-Host ('Installed GitHub revision: '+$targetRevision)
   }
-  if($Install) { Install-Schedule; Install-UpdateProtocol }
+  if($Install) { Install-Schedule }
+  # Self-heal the native button handler on normal scheduled/manual checks too.
+  Install-UpdateProtocol
   Write-Host ('Chrome unpacked extension: '+$ext)
   Write-Host 'Chrome: chrome://extensions -> Developer mode -> Load unpacked (once) -> path above.'
-  Write-Host 'Then click the new update button in the extension (Windows may ask to confirm the app launch).'
+  Write-Host 'The Chrome update button now triggers a silent WScript launcher. Chrome may ask permission to open the app.'
   Write-Host 'Keep only one Launcher extension enabled (disable the old copy if installed elsewhere).'
   Write-Host 'When Chrome reloads, active and installed revisions are reported to MCP.'
 } catch {
