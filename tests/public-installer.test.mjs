@@ -21,5 +21,19 @@ test('one-click update registers a per-user Windows protocol without accepting U
   assert.ok(s.includes('chatgpt-mcp-update'));
   assert.ok(s.includes('URL Protocol'));
   assert.ok(s.includes('Set-Item -Path $cmdKey'));
-  assert.ok(s.includes('if($Install) { Install-Schedule; Install-UpdateProtocol }'));
+  assert.ok(s.includes('System32\\wscript.exe'));
+  assert.ok(s.includes('launch-update.vbs'));
+  assert.ok(s.includes('sh.Run'));
+  assert.ok(s.includes('0, False'));
+  assert.ok(s.includes('if($Install) { Install-Schedule }'));
+  assert.ok(s.includes('Install-UpdateProtocol'));
+  assert.ok(!s.includes('Set-Item -Path $cmdKey -Value $launchHiddenPowerShell'));
+});
+
+test('manual check writes a unique progress id and a terminal result for unchanged versions',()=>{
+  assert.ok(s.includes('check_id = $checkId'));
+  assert.ok(s.includes("Report-Status 'checking'"));
+  assert.ok(s.includes("Report-Status 'current'"));
+  assert.ok(s.includes("Report-Status 'updated'"));
+  assert.ok(s.includes("Report-Status 'error'"));
 });
