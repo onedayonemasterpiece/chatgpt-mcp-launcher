@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT MCP Launcher",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "Launch or continue your own ChatGPT chats from an authenticated MCP relay.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "tabs", "scripting"],

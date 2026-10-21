@@ -138,7 +138,9 @@
     // Never consider the submission safe if the text or editor changes.
     for(let i=0;i<480;i++) {
       const current=composer();
-      if(current && draftText(current).trim()!==prompt.trim()) {
+      // The app mention added after the prompt may render as a chip, so only
+      // the prompt itself must still be there, unchanged, at the start.
+      if(current && !squash(draftText(current)).startsWith(squash(prompt))) {
         return {blocked:'Composer contents changed before submission'};
       }
       if(current) {
@@ -153,6 +155,17 @@
       await sleep(250);
     }
     return {blocked:'No safe Send button or unique ChatGPT composer form after 120 seconds'};
+  }
+  const squash = s => (s || '').replace(/\s+/g, ' ').trim();
+  async function addMention(el,name) {
+    // Owner's recipe, like a person: on a new line type "@App", wait for
+    // ChatGPT's app picker, then a space picks the app for this message.
+    el.focus();
+    document.execCommand('insertParagraph');
+    document.execCommand('insertText',false,'@'+name);
+    await sleep(7000);
+    document.execCommand('insertText',false,' ');
+    await sleep(1000);
   }
   function isConversationUrl(value) {
     // ChatGPT first shows a temporary "local" address for a new chat; never treat it as the slug.
@@ -187,6 +200,7 @@
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
+    if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) await addMention(ready,job.mention);
     const submit=await waitForSend(ready,job.prompt);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
     let method;

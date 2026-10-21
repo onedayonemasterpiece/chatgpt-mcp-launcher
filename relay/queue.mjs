@@ -29,9 +29,11 @@ const MODEL_STATES = ['started','done','failed'];
 // Appended to every prompt Chrome sends: the ChatGPT conversation itself
 // confirms through MCP that it got the prompt and reports its result.
 // This needs no reading of the ChatGPT page.
+// The ChatGPT app (this MCP server) as it is named in the owner's ChatGPT.
+export const APP_NAME = 'Chatgpt task lancher';
 export function callbackFooter(jobId) {
-  // One short line: newlines and "---" are reformatted by the ChatGPT editor.
-  return ' (Служебное: сразу вызови @Chatgpt task lancher chatgpt_report job_id='+jobId+
+  // One short line; the extension then mentions the app itself (job.mention).
+  return ' (Служебное: сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary.)';
 }
 
@@ -336,7 +338,8 @@ export class FileQueue {
       job.claimed_at=new Date().toISOString();
       await this.#save();
       const sends=job.action==='start'||job.action==='continue';
-      return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt};
+      return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt,
+        mention:sends?APP_NAME:undefined};
     });
   }
   async report(deviceId,data) {
