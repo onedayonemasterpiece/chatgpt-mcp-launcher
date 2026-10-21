@@ -8,6 +8,7 @@ and run by Windows Task Scheduler thereafter.
 param(
   [switch]$Install,
   [switch]$Check,
+  [switch]$Manual,
   [switch]$Status,
   [string]$Root = (Join-Path $env:LOCALAPPDATA 'ChatGPTMcpLauncher')
 )
@@ -28,6 +29,7 @@ $workspace = $null
 $targetRevision = $null
 $checkId = [guid]::NewGuid().ToString('N')
 $checkStartedAt = [DateTime]::UtcNow.ToString('o')
+$checkTrigger = if ($Manual) {'manual'} elseif ($Install) {'install'} else {'scheduled'}
 
 function Read-Json([string]$Path) {
   if(!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -68,6 +70,7 @@ function Report-Status([string]$State,[string]$ErrorCode='') {
     checked_at = [DateTime]::UtcNow.ToString('o')
     check_id = $checkId
     started_at = $checkStartedAt
+    trigger = $checkTrigger
     state = $State
     installed_revision = $rev
     source_revision = $targetRevision
@@ -105,7 +108,7 @@ function Install-UpdateProtocol {
   foreach($path in @($vbsPath,$updater,$Root,$powershell)) {
     if($path.Contains('"') -or $path.Contains([char]10) -or $path.Contains([char]13)) { throw 'invalid_launcher_path' }
   }
-  $arguments = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Check -Root "' + $Root + '"'
+  $arguments = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Manual -Root "' + $Root + '"'
   $vbs = 'Set sh = CreateObject("WScript.Shell")' + [Environment]::NewLine +
     'sh.Run "' + $arguments.Replace('"','""') + '", 0, False' + [Environment]::NewLine
   $existing = if(Test-Path -LiteralPath $vbsPath) {[System.IO.File]::ReadAllText($vbsPath)} else {$null}
