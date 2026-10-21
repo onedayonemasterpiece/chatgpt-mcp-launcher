@@ -103,7 +103,7 @@ function Install-UpdateProtocol {
   $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
   $powershell = Join-Path $PSHOME 'powershell.exe'
   foreach($path in @($vbsPath,$updater,$Root,$powershell)) {
-    if($path -match '["`r`n]') { throw 'invalid_launcher_path' }
+    if($path.Contains('"') -or $path.Contains([char]10) -or $path.Contains([char]13)) { throw 'invalid_launcher_path' }
   }
   $arguments = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Check -Root "' + $Root + '"'
   $vbs = 'Set sh = CreateObject("WScript.Shell")' + [Environment]::NewLine +
