@@ -21,6 +21,7 @@ function fixture(openTabs=[],opts={}) {
       query:async()=>[...tabs.values()],
       update:async(id,params)=>{calls.updated.push({id,...params});return tabs.get(id);},
       reload:async id=>{calls.reloads.push(id);},
+      remove:async id=>{calls.removed=(calls.removed||[]).concat(id);tabs.delete(id);},
       get:async(id)=>{
         const tab=tabs.get(id);
         if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading',...(opts.loadingUrl!==undefined?{url:opts.loadingUrl}:{})};
@@ -37,7 +38,7 @@ function fixture(openTabs=[],opts={}) {
     scripting:{executeScript:async(params)=>{
       calls.injections.push(params.target.tabId);
       if(params.files) return [];
-      if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,generating:false}}];
+      if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,answering:false}}];
       if(opts.driverResults?.length) return [{result:opts.driverResults.shift()}];
       return [{result:{
         status:'sent',chat_url:params.args[0].chat_url??CHAT,message:'fixture send clicked',
@@ -158,4 +159,28 @@ test('open-only never reloads or probes the tab',async()=>{
   await f.execute({action:'open',chat_url:CHAT,id:'open-3'});
   assert.deepEqual(f.calls.reloads,[]);
   assert.deepEqual(f.calls.injections,[]);
+});
+
+test('close-chat closes only idle tabs of that conversation',async()=>{
+  const f=fixture([{id:40,url:CHAT},{id:41,url:OTHER}]);
+  const result=await f.execute({action:'close',chat_url:CHAT,id:'close-1'});
+  assert.equal(result.status,'closed');
+  assert.deepEqual(f.calls.removed,[40]);
+  assert.deepEqual(f.calls.created,[]);
+});
+
+test('close-chat leaves a tab with a draft or a reply in progress open',async()=>{
+  for(const probe of [{draft:true,answering:false},{draft:false,answering:true}]) {
+    const f=fixture([{id:42,url:CHAT}],{probe});
+    const result=await f.execute({action:'close',chat_url:CHAT,id:'close-2'});
+    assert.equal(result.status,'blocked',JSON.stringify(probe));
+    assert.equal(f.calls.removed,undefined);
+  }
+});
+
+test('close-chat with no open tab is simply done',async()=>{
+  const f=fixture([{id:43,url:OTHER}]);
+  const result=await f.execute({action:'close',chat_url:CHAT,id:'close-3'});
+  assert.equal(result.status,'closed');
+  assert.match(result.message,/No open tab/);
 });

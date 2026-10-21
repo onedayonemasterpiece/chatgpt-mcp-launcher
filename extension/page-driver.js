@@ -313,4 +313,8 @@
   }
   globalThis.chatGPTLauncherRun = run;
   globalThis.chatGPTLauncherRead = read;
+  globalThis.chatGPTLauncherProbe = () => {
+    const el=composer();
+    return {draft:!!(el && draftText(el).trim()),answering:replyInProgress()};
+  };
 })();
