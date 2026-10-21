@@ -15,7 +15,7 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  const popup=id=>elements.get(id);
  const config={};
  const requests=[];
- let manualUpdater={state:'current',checked_at:'2026-10-21T13:00:00Z',check_id:'a'.repeat(32)};
+ let manualUpdater={state:'current',checked_at:'2026-10-21T13:00:00Z',check_id:'a'.repeat(32),trigger:'scheduled'};
  const callbacks=[];
  const chrome={
    storage:{local:{get:async()=>({}),set:async()=>{}}},
@@ -54,8 +54,11 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  popup('updateNow').handlers.click();
  assert.match(popup('status').textContent,/Запрашиваю проверку обновлений/);
  assert.equal(callbacks.length,1);
- manualUpdater={state:'current',checked_at:'2026-10-21T13:01:00Z',check_id:'b'.repeat(32)};
+ manualUpdater={state:'current',checked_at:'2026-10-21T13:01:00Z',check_id:'b'.repeat(32),trigger:'scheduled'};
+ await callbacks[0]();
+ assert.match(popup('status').textContent,/Запрашиваю проверку обновлений/,'scheduled task must not confirm a manual click');
+ manualUpdater={state:'current',checked_at:'2026-10-21T13:02:00Z',check_id:'c'.repeat(32),trigger:'manual'};
  await callbacks[0]();
  assert.match(popup('status').textContent,/Обновлений нет/);
- assert.match(popup('updateStatus').textContent,/Обновлений нет/);
+ assert.match(popup('updateStatus').textContent,/Ручная проверка/);
 });
