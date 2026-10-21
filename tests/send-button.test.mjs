@@ -49,8 +49,9 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      }
      return [];
    },
-   execCommand:(command,_show,prompt)=>{
-     assert.equal(command,'insertText');state.insertions++;editor.innerText=prompt;return true;}
+   execCommand:(command,_show,text)=>{
+     if(command==='insertParagraph'){editor.innerText+='\n';return true;}
+     assert.equal(command,'insertText');state.insertions++;editor.innerText+=text;return true;}
  };
  const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'})},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
@@ -191,4 +192,19 @@ test('an Enter that does not deliver is never repeated',async()=>{
  const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
  assert.equal(result.status,'needs_review');
  assert.equal(f.state.enters,1);
+});
+
+test('the launcher app is mentioned on a new line, picked with a space, then sent once',async()=>{
+ const f=fixture();
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto',mention:'Chatgpt task lancher'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.insertions,3,'prompt, @mention, space');
+ assert.equal(f.state.clicks,1);
+});
+
+test('a malformed app name is never typed',async()=>{
+ const f=fixture();
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto',mention:'x<script>'});
+ assert.equal(result.status,'sent');
+ assert.equal(f.state.insertions,1);
 });
