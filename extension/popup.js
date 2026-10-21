@@ -65,6 +65,11 @@ $('poll').addEventListener('click',async()=>{
   } catch(err) {status('Ошибка: '+err.message);}
   finally {$('poll').disabled=false;}
 });
+$('updateNow').addEventListener('click',()=>{
+  // User gesture navigates to the per-user registered Windows URL protocol.
+  // Do not preventDefault: Chrome must invoke the native OS handler.
+  status('Запускаю обновлятор Windows. Если Chrome попросит подтверждение, разрешите открытие приложения. После обновления Chrome перезапустит расширение.');
+});
 $('refresh').addEventListener('click',async()=>{
   try {await showVersion();} catch(err) {status('Ошибка: '+err.message);}
 });
