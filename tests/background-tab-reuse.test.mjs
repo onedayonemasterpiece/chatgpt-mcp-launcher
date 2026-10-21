@@ -67,9 +67,28 @@ test('continue opens target conversation without navigating an unrelated open ch
   assert.deepEqual(f.calls.injections,[100,100]);
 });
 
+test('open-only reuses existing conversation and never touches composer or Send button',async()=>{
+  const f=fixture([{id:21,url:CHAT}]);
+  const result=await f.execute({action:'open',chat_url:CHAT,id:'open-job-1'});
+  assert.equal(result.status,'opened');
+  assert.equal(result.chat_url,CHAT);
+  assert.deepEqual(f.calls.created,[]);
+  assert.deepEqual(f.calls.updated,[{id:21,active:true}]);
+  assert.deepEqual(f.calls.injections,[],'open-only must not inject page driver');
+});
+
+test('open-only creates target tab if absent and never submits a prompt',async()=>{
+  const f=fixture([{id:10,url:OTHER}]);
+  const result=await f.execute({action:'open',chat_url:CHAT,id:'open-job-2'});
+  assert.equal(result.status,'opened');
+  assert.equal(f.calls.created.length,1);
+  assert.equal(f.calls.created[0].url,CHAT);
+  assert.deepEqual(f.calls.injections,[]);
+});
+
 test('a URL outside ChatGPT is rejected before browser tab access',async()=>{
   const f=fixture([{id:19,url:OTHER}]);
-  await assert.rejects(()=>f.execute({action:'continue',chat_url:'https://example.com/c/abc',prompt:'x'}),/Invalid ChatGPT continuation URL/);
+  await assert.rejects(()=>f.execute({action:'continue',chat_url:'https://example.com/c/abc',prompt:'x'}),/Invalid ChatGPT conversation URL/);
   assert.deepEqual(f.calls.created,[]);
   assert.deepEqual(f.calls.updated,[]);
 });

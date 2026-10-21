@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} from './conversations.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
-const REPORT_STATES = ['sent', 'blocked', 'failed', 'needs_review'];
+const REPORT_STATES = ['sent','opened','blocked','failed','needs_review'];
+const PROGRESS_STATES = ['opening','loading','waiting_composer','draft_ready','submitting','reconciling'];
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -28,7 +30,7 @@ function requireString(value, name, maxLen = 256) {
 }
 
 export class FileQueue {
-  #state = { jobs: [], device_status: {} };
+  #state = { jobs: [], device_status: {}, chats: [] };
   #serial = Promise.resolve();
   constructor(file, devices) {
     this.file = file;
@@ -129,7 +131,12 @@ export class FileQueue {
     try {
       const parsed = JSON.parse(await readFile(this.file, 'utf8'));
       if (!Array.isArray(parsed.jobs)) throw new Error('Invalid state');
-      this.#state = {...parsed, device_status:parsed.device_status || {}};
+      this.#state = {...parsed,device_status:parsed.device_status||{},chats:Array.isArray(parsed.chats)?parsed.chats:[]};
+      for(const old of parsed.jobs) {
+        const url=canonicalChatUrl(old.result_chat_url);
+        if(url && !this.#state.chats.some(c=>c.device_id===old.device_id&&c.chat_url===url))
+          this.#recordChat(url,old.device_id,old.id,old.status);
+      }
       for(const [deviceId,item] of Object.entries(this.#state.device_status)) {
         if(Object.hasOwn(this.devices,deviceId) && item && typeof item==='object') {
           this.deviceObservations.set(deviceId,item);
@@ -151,38 +158,116 @@ export class FileQueue {
     return promise;
   }
   async enqueue(args) {
-    return this.#run(async () => {
-      const action = args.action;
-      if (!['start', 'continue'].includes(action)) throw new Error('Invalid action');
-      const prompt = requireString(args.prompt, 'prompt', MAX_PROMPT);
-      const effort = args.effort || 'auto';
-      if (!EFFORTS.includes(effort)) throw new Error(`effort must be ${EFFORTS.join(', ')}`);
-      const deviceId = args.device_id || 'desktop';
-      if (!Object.hasOwn(this.devices, deviceId)) throw new Error('Unknown device_id');
-      if (action === 'continue' && !validChatUrl(args.chat_url)) throw new Error('Invalid ChatGPT conversation URL');
-      if (args.slack_thread_url !== undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url)) {
-        throw new Error('Invalid Slack thread URL');
+    return this.#run(async()=>{
+      const action=args.action;
+      if(!['start','continue','open'].includes(action))throw Error('Invalid action');
+      const prompt=action==='open'?null:requireString(args.prompt,'prompt',MAX_PROMPT);
+      // No defaulting to the currently selected Pro model: choose Extra High.
+      const effort=action==='open'?'auto':(args.effort??'xhigh');
+      if(!EFFORTS.includes(effort))throw Error('Invalid effort');
+      const deviceId=args.device_id||'desktop';
+      if(!Object.hasOwn(this.devices,deviceId))throw Error('Unknown device_id');
+      const hasUrl=typeof args.chat_url==='string'&&args.chat_url.trim().length>0;
+      const hasRef=typeof args.chat_ref==='string'&&args.chat_ref.trim().length>0;
+      if(action!=='start' && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
+      let target=null;
+      if(action!=='start') {
+        target=hasUrl?canonicalChatUrl(args.chat_url):this.resolveChat(args.chat_ref,deviceId);
+        if(!target)throw Error('Unknown or invalid ChatGPT conversation reference');
       }
-      const requestId = args.request_id === undefined ? undefined : requireString(args.request_id, 'request_id', 128);
-      if (requestId) {
-        const existing = this.#state.jobs.find(j => j.request_id === requestId && j.device_id === deviceId);
-        if (existing) return this.#public(existing);
+      if(args.slack_thread_url!==undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url))
+        throw Error('Invalid Slack thread URL');
+      const requestId=args.request_id===undefined?undefined:requireString(args.request_id,'request_id',128);
+      if(requestId) {
+        const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
+        if(existing) {
+          if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target)
+            throw Error('Idempotency key belongs to a different operation');
+          return this.#public(existing);
+        }
       }
-      if (this.#state.jobs.length >= MAX_JOBS) {
-        const removable = this.#state.jobs.findIndex(j => ['sent', 'failed', 'blocked'].includes(j.status));
-        if (removable === -1) throw new Error('Queue capacity reached');
-        this.#state.jobs.splice(removable, 1);
+      if(this.#state.jobs.length>=MAX_JOBS) {
+        const removable=this.#state.jobs.findIndex(j=>['sent','opened','failed','blocked'].includes(j.status));
+        if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
+        this.#state.jobs.splice(removable,1);
       }
-      const job = {
-        id: randomUUID(), action, prompt, effort, device_id: deviceId,
-        chat_url: action === 'continue' ? args.chat_url : null,
-        slack_thread_url: args.slack_thread_url || null,
-        request_id: requestId || null,
-        status: 'queued', created_at: new Date().toISOString(),
+      const now=new Date().toISOString();
+      const job={
+        id:randomUUID(),action,prompt,effort,device_id:deviceId,
+        chat_url:target,slack_thread_url:args.slack_thread_url||null,
+        request_id:requestId||null,status:'queued',phase:'queued',created_at:now,progress_at:now
       };
       this.#state.jobs.push(job);
       await this.#save();
       return this.#public(job);
+    });
+  }
+  resolveChat(reference,deviceId='desktop') {
+    const jobs=this.#state.jobs.filter(j=>j.device_id===deviceId);
+    const chats=this.#state.chats.filter(c=>c.device_id===deviceId);
+    return referenceToUrl(reference,chats,jobs);
+  }
+  listChats(deviceId='desktop',limit=20) {
+    if(!Object.hasOwn(this.devices,deviceId))throw Error('Unknown device');
+    if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('limit must be 1-50');
+    const chats=this.#state.chats.filter(c=>c.device_id===deviceId);
+    return {device_id:deviceId,total:chats.length,
+      chats:chats.slice().sort((a,b)=>b.last_seen_at.localeCompare(a.last_seen_at)).slice(0,limit)};
+  }
+  chatStatus(reference,deviceId='desktop') {
+    const url=this.resolveChat(reference,deviceId);
+    if(!url)throw Error('Unknown or invalid conversation reference');
+    const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===deviceId)||null;
+    const jobs=this.#state.jobs.filter(j=>j.device_id===deviceId &&
+      (j.chat_url===url||j.result_chat_url===url||j.observed_chat_url===url));
+    return {device_id:deviceId,chat_url:url,chat_id:chatIdFromUrl(url),
+      registered:!!chat,conversation:chat,jobs:jobs.slice(-5).map(j=>this.#public(j)),
+      note:'Transport metadata only; model response and task completion are not verified'};
+  }
+  #recordChat(chatUrl,deviceId,jobId,transport='observed') {
+    const url=canonicalChatUrl(chatUrl);
+    if(!url)return null;
+    const i=this.#state.chats.findIndex(c=>c.chat_url===url&&c.device_id===deviceId);
+    const previous=i>=0?this.#state.chats[i]:null;
+    const next=recordedChat(url,deviceId,jobId,previous,new Date().toISOString(),transport);
+    if(i>=0)this.#state.chats[i]=next;else this.#state.chats.push(next);
+    if(this.#state.chats.length>MAX_CHATS) {
+      this.#state.chats.sort((a,b)=>b.last_seen_at.localeCompare(a.last_seen_at));
+      this.#state.chats.length=MAX_CHATS;
+    }
+    return next;
+  }
+  async progress(deviceId,data) {
+    return this.#run(async()=>{
+      const id=requireString(data.job_id,'job_id',100);
+      if(!PROGRESS_STATES.includes(data.phase))throw Error('Invalid progress phase');
+      const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
+      if(!job||job.status!=='claimed')throw Error('Only claimed jobs can report progress');
+      job.phase=data.phase;
+      job.progress_at=new Date().toISOString();
+      if(data.chat_url!==undefined) {
+        const url=canonicalChatUrl(data.chat_url);
+        if(!url)throw Error('Invalid progress ChatGPT URL');
+        job.observed_chat_url=url;
+        this.#recordChat(url,deviceId,id,'progress');
+      }
+      await this.#save();
+      return this.#public(job);
+    });
+  }
+  async observeChat(deviceId,data) {
+    return this.#run(async()=>{
+      const id=requireString(data.job_id,'job_id',100);
+      const url=canonicalChatUrl(data.chat_url);
+      if(!url)throw Error('Invalid observed ChatGPT URL');
+      const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
+      if(!job||job.status==='queued')throw Error('Job does not belong to this browser');
+      if(job.chat_url&&job.chat_url!==url)throw Error('Unexpected ChatGPT conversation for job');
+      job.observed_chat_url=url;
+      job.observed_at=new Date().toISOString();
+      this.#recordChat(url,deviceId,id,'observed');
+      await this.#save();
+      return {job_id:id,chat_url:url,chat_id:chatIdFromUrl(url),recorded:true};
     });
   }
   #public(job) {
@@ -191,37 +276,46 @@ export class FileQueue {
     return publicJob;
   }
   status(jobId) {
-    return this.#public(this.#state.jobs.find(j => j.id === jobId));
+    return this.#public(this.#state.jobs.find(j=>j.id===jobId));
   }
   counts() {
-    return this.#state.jobs.reduce((o, j) => { o[j.status] = (o[j.status] || 0) + 1; return o; }, {});
+    return this.#state.jobs.reduce((o,j)=>{o[j.status]=(o[j.status]||0)+1;return o;},{});
   }
   async claim(deviceId) {
-    return this.#run(async () => {
-      const job = this.#state.jobs.find(j => j.device_id === deviceId && j.status === 'queued');
-      if (!job) return null;
-      job.status = 'claimed';
-      job.claimed_at = new Date().toISOString();
+    return this.#run(async()=>{
+      const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
+      if(!job)return null;
+      job.status='claimed';
+      job.phase='opening';
+      job.claimed_at=new Date().toISOString();
+      job.progress_at=job.claimed_at;
       await this.#save();
-      return { ...job, request_id: undefined };
+      return {...job,request_id:undefined};
     });
   }
-  async report(deviceId, data) {
-    return this.#run(async () => {
-      const id = requireString(data.job_id, 'job_id', 100);
-      if (!REPORT_STATES.includes(data.status)) throw new Error('Invalid report status');
-      const job = this.#state.jobs.find(j => j.id === id && j.device_id === deviceId);
-      if (!job) throw new Error('Unknown job');
-      if (job.status !== 'claimed') {
-        if (job.status === data.status) return this.#public(job); // ack retry
-        throw new Error('Job is not claimed');
+  async report(deviceId,data) {
+    return this.#run(async()=>{
+      const id=requireString(data.job_id,'job_id',100);
+      if(!REPORT_STATES.includes(data.status))throw Error('Invalid report status');
+      const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
+      if(!job)throw Error('Unknown job');
+      if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
+      if(job.action==='open'&&data.status==='sent')throw Error('Open-only jobs can never report sent');
+      if(job.status!=='claimed') {
+        if(job.status===data.status)return this.#public(job);
+        throw Error('Job is not claimed');
       }
-      const url = data.chat_url || null;
-      if (url !== null && !validChatUrl(url)) throw new Error('Invalid result chat URL');
-      job.status = data.status;
-      job.result_chat_url = url;
-      job.message = typeof data.message === 'string' ? data.message.slice(0, 500) : '';
-      job.reported_at = new Date().toISOString();
+      const url=data.chat_url||null;
+      if(url!==null&&!canonicalChatUrl(url))throw Error('Invalid result ChatGPT URL');
+      if(job.chat_url&&url&&canonicalChatUrl(job.chat_url)!==canonicalChatUrl(url))
+        throw Error('Reported chat differs from requested conversation');
+      job.status=data.status;
+      job.phase=data.status;
+      job.progress_at=new Date().toISOString();
+      job.result_chat_url=url?canonicalChatUrl(url):null;
+      if(url)this.#recordChat(url,deviceId,id,data.status);
+      job.message=typeof data.message==='string'?data.message.slice(0,500):'';
+      job.reported_at=new Date().toISOString();
       await this.#save();
       return this.#public(job);
     });

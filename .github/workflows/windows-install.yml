@@ -2,6 +2,8 @@ name: Windows installer acceptance
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,6 +17,7 @@ jobs:
         shell: pwsh
         run: npm test
       - name: Install and verify no-admin updater
+        if: github.event_name != 'pull_request'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
