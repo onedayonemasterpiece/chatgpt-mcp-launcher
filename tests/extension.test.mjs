@@ -20,6 +20,7 @@ try {
   assert.equal(await page.evaluate(()=>window.sentCount), 1);
   assert.match(await page.locator('#model').innerText(), /Средний/);
   assert.equal((await page.locator('#thread').innerText()).trim(),'First launch');
+  assert.equal((await page.locator('#other-input').innerText()).trim(),"user's unrelated draft",'never type into similarly labelled secondary editor');
 
   await page.locator('#composer').fill('existing user draft');
   const second=await page.evaluate(()=>window.chatGPTLauncherRun({action:'continue',prompt:'Follow-up',effort:'high'}));
@@ -30,5 +31,6 @@ try {
   assert.equal(third.status, 'sent',JSON.stringify(third));
   assert.equal(await page.evaluate(()=>window.sentCount), 2);
   assert.match(await page.locator('#model').innerText(), /Высокий/);
-  console.log('PASS: start, continue, medium/high effort, never overwrite user draft');
+  assert.equal((await page.locator('#other-input').innerText()).trim(),"user's unrelated draft");
+  console.log('PASS: start, continue, medium/high effort, uniquely selected primary composer, no draft overwrite');
 } finally { await browser.close(); }
