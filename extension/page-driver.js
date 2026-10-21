@@ -133,16 +133,6 @@
     }
     return null;
   }
-  function composerForm(el) {
-    const form=el?.closest?.('form');
-    if(!form || !form.isConnected || !form.contains(el) ||
-       typeof form.requestSubmit!=='function') return null;
-    // Form submission is only allowed when we can prove this is the one
-    // ChatGPT composer in that form, not a sidebar or unrelated modal.
-    const editors=[...form.querySelectorAll('[contenteditable="true"],textarea')]
-      .filter(visible);
-    return editors.length===1 && editors[0]===el ? form : null;
-  }
   async function waitForSend(input,prompt) {
     // ChatGPT can hydrate the Send button well after the composer itself.
     // Never consider the submission safe if the text or editor changes.
@@ -155,14 +145,10 @@
         const button=submitButton(current);
         if(button?.blocked) return button;
         if(button) return {button,editor:current};
-        // A form's requestSubmit() asks the browser to run its native submit
-        // pathway (including React's onSubmit). Unlike dispatchEvent of a
-        // KeyboardEvent, this does not pretend a synthetic Enter is trusted.
-        const form=composerForm(current);
-        if(form && i>=40) return {form,editor:current};
-        // No Send button and no composer form after 90 s (a slow page can draw the
-        // button late): ChatGPT submits on Enter, so press it once (owner decision).
-        if(!form && i>=360) return {enter:true,editor:current};
+        // No recognised Send button within 3 s: ChatGPT submits on Enter, so
+        // press it once (owner decision). A native form submit is ignored by
+        // ChatGPT (live job at 18:58 UTC), so it is not used.
+        if(i>=12) return {enter:true,editor:current};
       }
       await sleep(250);
     }
@@ -216,10 +202,6 @@
         submit.editor.dispatchEvent(new KeyboardEvent('keydown',init));
         submit.editor.dispatchEvent(new KeyboardEvent('keyup',init));
         method='Enter';
-      } else if(submit.form) {
-        // One browser-native form submission, not fabricated keydown/keyup.
-        submit.form.requestSubmit();
-        method='Native form submit';
       } else {
         return {status:'blocked',message:'No safe native submission path'};
       }
