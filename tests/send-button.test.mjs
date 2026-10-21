@@ -6,13 +6,13 @@ import {runInNewContext} from 'node:vm';
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
-                  transientUrls=[]}={}) {
+                  transientUrls=[],answeringPolls=0}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0};
+ const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -32,6 +32,10 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  const document={
    activeElement:null,
    querySelectorAll(selector) {
+     if(selector.includes('stop-button')) {
+       if(state.answerChecks++<answeringPolls) return [{isConnected:true,getBoundingClientRect:visible}];
+       return [];
+     }
      if(selector==='[contenteditable="true"],textarea') return [editor];
      if(formOnly||noButton) return [];
      if(selector==='button[data-testid="composer-send-button"]') {
@@ -184,4 +188,21 @@ test('read reports a reply that is still being written, and an empty chat',async
  assert.equal(empty.reply_text,null);
  const wrong=await readFixture({href:'https://chatgpt.com/'}).read({action:'read'});
  assert.equal(wrong.status,'blocked');
+});
+
+
+test('continue waits until ChatGPT finishes answering, then sends once',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',answeringPolls:30});
+ const result=await f.run({action:'continue',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.ok(f.state.answerChecks>30);
+ assert.equal(f.state.clicks,1);
+});
+
+test('an answer that never ends blocks the continue without sending anything',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',answeringPolls:1e9});
+ const result=await f.run({action:'continue',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'blocked');
+ assert.match(result.message,/nothing was sent/);
+ assert.equal(f.state.insertions+f.state.clicks+f.state.nativeSubmits,0);
 });
