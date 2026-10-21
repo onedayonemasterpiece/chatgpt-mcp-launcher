@@ -4,9 +4,16 @@ let lastUpdaterCheckId=null;
 let manualUpdateTimer=null;
 let manualUpdateBaseline=null;
 let manualUpdateTries=0;
-function updaterSummary(info) {
+function needsActivation(info) {
+  return !!(info?.active_revision && info?.installed_revision &&
+    info.active_revision!==info.installed_revision);
+}
+function updaterSummary(info,version=null) {
+  // IMPORTANT: a successful disk check is not proof Chrome loaded that code.
+  if(needsActivation(version)) return 'Файлы обновлены, но Chrome ещё исполняет предыдущую версию. Ожидается активация.';
+  if(version?.runtime_integrity==='mismatch') return 'Исполняемый код не совпадает с файлами; ожидается безопасная перезагрузка.';
   const state=info?.state||'unknown';
-  if(state==='current') return 'Обновлений нет — установлена актуальная версия.';
+  if(state==='current') return 'Обновлений нет — активна актуальная версия.';
   if(state==='updated') return 'Новая версия установлена. Chrome должен её активировать.';
   if(state==='checking') return 'Выполняется проверка обновлений GitHub…';
   if(state==='error') return 'Ошибка проверки: '+(info.error_code||'неизвестная ошибка');
@@ -22,8 +29,12 @@ async function watchManualUpdate() {
     const result=await chrome.runtime.sendMessage({type:'GET_UPDATE_STATUS'});
     if(result?.error) throw new Error(result.error);
     if(result?.check_id && result.check_id!==manualUpdateBaseline && result.trigger==='manual') {
-      status(updaterSummary(result));
+      const version=await chrome.runtime.sendMessage({type:'GET_VERSION'});
+      const note=updaterSummary(result,version);
+      status(note);
       if(['current','updated','error'].includes(result.state)) {
+        // The popup's final verdict must also reflect *loaded* worker revision.
+        // New code may require a separate Chrome reload after ZIP installation.
         stopUpdateWatch();
         await showVersion();
         return;
@@ -53,11 +64,12 @@ async function showVersion() {
   $('activeRevision').textContent=info.active_revision || 'не подтверждена';
   $('installedRevision').textContent=info.installed_revision || 'не определена';
   $('manifestVersion').textContent=info.manifest_version || '—';
-  $('integrity').textContent=info.runtime_integrity==='ok' ? 'проверена' :
-    info.runtime_integrity==='mismatch' ? 'несовпадение файлов' : 'не проверена';
+  $('integrity').textContent=needsActivation(info) ? 'ожидается активация новой версии' :
+    info.runtime_integrity==='ok' ? 'проверена' :
+    info.runtime_integrity==='mismatch' ? 'несовпадение файлов (ожидается перезагрузка)' : 'не проверена';
   const updater=info.updater||{};
   lastUpdaterCheckId=updater.check_id||null;
-  $('updateStatus').textContent=(updater.trigger==='manual' ? 'Ручная проверка. ' : updater.trigger==='scheduled' ? 'Автоматическая проверка. ' : '')+updaterSummary(updater)+
+  $('updateStatus').textContent=(updater.trigger==='manual' ? 'Ручная проверка. ' : updater.trigger==='scheduled' ? 'Автоматическая проверка. ' : '')+updaterSummary(updater,info)+
     (updater.checked_at ? ' Проверено: '+updater.checked_at : '');
   $('heartbeatStatus').textContent=info.last_connection_error ?
     'Ошибка: '+info.last_connection_error : (info.last_heartbeat_at || 'нет подтверждения');
