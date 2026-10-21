@@ -30,10 +30,9 @@ const MODEL_STATES = ['started','done','failed'];
 // confirms through MCP that it got the prompt and reports its result.
 // This needs no reading of the ChatGPT page.
 export function callbackFooter(jobId) {
-  return '\n\n---\nСлужебное для приложения «Chatgpt task lancher» (задание '+jobId+'): '+
-    'сразу, до начала работы, вызови его инструмент chatgpt_report с job_id="'+jobId+'" и status="started". '+
-    'Когда закончишь, вызови chatgpt_report ещё раз с тем же job_id, status="done" и summary — коротким итогом '+
-    '(если не получилось — status="failed" и причина в summary). Если инструмент недоступен, просто выполни задачу.';
+  // One short line: newlines and "---" are reformatted by the ChatGPT editor.
+  return ' (Служебное: сразу вызови @Chatgpt task lancher chatgpt_report job_id='+jobId+
+    ' status=started, в конце status=done и summary.)';
 }
 
 // One plain instruction per state, so a calling agent always knows what to do next.
