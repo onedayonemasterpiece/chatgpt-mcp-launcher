@@ -339,7 +339,8 @@ export class FileQueue {
       await this.#save();
       const sends=job.action==='start'||job.action==='continue';
       return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt,
-        mention:sends?APP_NAME:undefined};
+        mention:sends?APP_NAME:undefined,
+        own_text:sends?job.prompt:undefined}; // lets Chrome recognise its own unsent earlier attempt
     });
   }
   async report(deviceId,data) {
