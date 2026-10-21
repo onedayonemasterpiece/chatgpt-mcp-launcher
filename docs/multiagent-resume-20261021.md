@@ -5,13 +5,16 @@
 - The core of the feature is the conversation **slug**: get it, find the open tab by it (or open it), and continue there.
 - Browser automation is fragile, so it does as few fragile steps as possible. No tab tracking and no progress reporting during a job.
 - A missed launch is worse than running on a different effort level. ChatGPT remembers the last selected level, so by default the launcher **does not touch the effort picker** (`effort: auto`). An explicitly requested level is tried once; if it cannot be selected or verified, the prompt is still sent and the job message says so.
-- Submitting a prompt: click the unique Send button; if there is none, press Enter once in the focused composer. Never submit twice after an uncertain outcome.
+- Submitting a prompt: one submission only (see the page driver), never twice after an uncertain outcome.
+- An already open tab is reused: the same conversation for continue/open/read, an empty "New chat" page for start. If that page holds someone's unsent draft, nothing is typed there and the new chat starts in a fresh tab.
+- The launcher sits in dot's chain of helpers, so it must be able to confirm a result: `chatgpt_read_reply` returns the text of the last ChatGPT reply (text, not screenshots: a screenshot permission would make Chrome disable the extension until the owner re-approves it).
 
 ## MCP tools
 
 - `chatgpt_start({prompt, effort?, device_id?, request_id?, slack_thread_url?})` — new chat. `chatgpt_task_status` later returns `chat_url` and `chat_id` (slug).
 - `chatgpt_continue({chat_ref | chat_url, prompt, ...})` — exactly one of `chat_ref` / `chat_url`. `chat_ref` is a slug, a full URL, or the job ID that created the chat. Reuses the open tab with that conversation or opens it.
 - `chatgpt_open({chat_ref | chat_url, device_id?, request_id?})` — bring the conversation to the front without sending anything. Final status `opened`, never `sent`.
+- `chatgpt_read_reply({chat_ref | chat_url, device_id?, request_id?})` — reuse or open the conversation and read the last ChatGPT reply; never types or clicks. `chatgpt_task_status` returns `reply_text` (up to 20,000 characters, `null` if there is no reply yet) and `reply_generating` (`true` while ChatGPT is still writing: read again later).
 - `chatgpt_list_chats({device_id?, limit?})` — conversations started or continued through the launcher, newest first: `chat_url`, `chat_id`, first/last seen, source and last job ID. No prompt or reply text.
 - `chatgpt_task_status({job_id})`, `chatgpt_device_status({device_id?})` — unchanged.
 
@@ -23,8 +26,8 @@
 
 ## Job states
 
-`queued → claimed → sent | opened | blocked | failed | needs_review`. `sent` means the prompt was delivered (composer cleared or new `/c/` address), not that the model answered. `needs_review` is never retried automatically. An existing unsent user draft blocks the job instead of being overwritten.
+`queued → claimed → sent | opened | read | blocked | failed | needs_review`. `sent` means the prompt was delivered (composer cleared or new `/c/` address), not that the model answered; use `chatgpt_read_reply` for the answer. `needs_review` is never retried automatically. An existing unsent user draft blocks the job instead of being overwritten.
 
 ## Privacy
 
-No reply text, screenshots, DOM dumps, cookies or prompts are returned through MCP. Slack completion is confirmed separately with the Slack tool.
+Owner decision (21 October 2026): the last ChatGPT reply of a conversation is returned through the private, authenticated MCP only by an explicit `chatgpt_read_reply` call. Screenshots, DOM dumps, cookies and prompts are never returned. Slack completion is confirmed separately with the Slack tool.

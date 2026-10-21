@@ -35,7 +35,9 @@ function fixture(openTabs=[],opts={}) {
     windows:{update:async(id,params)=>calls.windows.push({id,...params})},
     scripting:{executeScript:async(params)=>{
       calls.injections.push(params.target.tabId);
-      return params.files?[]:[{result:{
+      if(params.files) return [];
+      if(opts.driverResults?.length) return [{result:opts.driverResults.shift()}];
+      return [{result:{
         status:'sent',chat_url:params.args[0].chat_url??CHAT,message:'fixture send clicked',
       }}];
     }},
@@ -115,4 +117,35 @@ test('a ChatGPT page that never finishes loading still proceeds after 30 seconds
 test('a tab that never reaches chatgpt.com fails after 90 seconds',async()=>{
   const f=fixture([{id:52,url:'about:blank',status:'loading'}],{slowLoadReads:10_000,instantTimers:true,loadingUrl:'about:blank'});
   await assert.rejects(()=>f.awaitTab(52),/did not open within 90 seconds/);
+});
+
+const HOME='https://chatgpt.com/';
+test('start reuses an already open empty New chat tab',async()=>{
+  const f=fixture([{id:30,url:CHAT},{id:31,url:HOME}]);
+  const result=await f.execute({action:'start',prompt:'New conversation',effort:'auto'});
+  assert.equal(result.status,'sent');
+  assert.deepEqual(f.calls.created,[]);
+  assert.deepEqual(f.calls.updated,[{id:31,active:true}]);
+  assert.deepEqual(f.calls.injections,[31,31]);
+});
+
+test('start falls back to a fresh tab when the open New chat tab holds a draft',async()=>{
+  const f=fixture([{id:32,url:HOME}],{driverResults:[
+    {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'},
+    {status:'sent',chat_url:CHAT,message:'New chat created via Send button.'}]});
+  const result=await f.execute({action:'start',prompt:'New conversation',effort:'auto'});
+  assert.equal(result.status,'sent');
+  assert.equal(f.calls.created.length,1);
+  assert.equal(f.calls.created[0].url,HOME);
+  assert.deepEqual(f.calls.injections,[32,32,100,100]);
+});
+
+test('read reuses the conversation tab and passes the reply through',async()=>{
+  const f=fixture([{id:33,url:CHAT}],{driverResults:[
+    {status:'read',chat_url:CHAT,reply_text:'PONG',reply_generating:false,message:'Last ChatGPT reply read'}]});
+  const result=await f.execute({action:'read',chat_url:CHAT,id:'read-1'});
+  assert.equal(result.status,'read');
+  assert.equal(result.reply_text,'PONG');
+  assert.equal(result.reply_generating,false);
+  assert.deepEqual(f.calls.created,[]);
 });

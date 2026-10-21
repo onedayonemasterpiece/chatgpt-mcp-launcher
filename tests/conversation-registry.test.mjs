@@ -83,7 +83,7 @@ test('open-only job has no prompt or effort and can never report sent',async t=>
   assert.equal(task.effort,null);
   assert.equal(task.chat_url,URL);
   await q.claim('desktop');
-  await assert.rejects(q.report('desktop',{job_id:task.id,status:'sent',chat_url:URL}),/Open-only/);
+  await assert.rejects(q.report('desktop',{job_id:task.id,status:'sent',chat_url:URL}),/never report sent/);
   const done=await q.report('desktop',{job_id:task.id,status:'opened',chat_url:URL});
   assert.equal(done.status,'opened');
   assert.equal(q.listChats().chats[0].chat_url,URL);
@@ -106,4 +106,21 @@ test('a temporary local ChatGPT address is never stored as a slug',()=>{
   for(const url of ['https://chatgpt.com/c/local-abc123456','https://chatgpt.com/local/'+ID,'https://chatgpt.com/c/LOCAL-abc123456'])
     assert.equal(canonicalChatUrl(url),null,url);
   assert.equal(referenceToUrl('local-abc123456'),null);
+});
+test('read job has no prompt, returns the reply text and can never report sent',async t=>{
+  const {q}=await setup(t);
+  const task=await q.enqueue({action:'read',chat_ref:ID});
+  assert.equal(task.prompt,undefined);
+  assert.equal(task.effort,null);
+  await q.claim('desktop');
+  await assert.rejects(q.report('desktop',{job_id:task.id,status:'sent',chat_url:URL}),/never report sent/);
+  const done=await q.report('desktop',{job_id:task.id,status:'read',chat_url:URL,
+    reply_text:'PONG'+'x'.repeat(30_000),reply_generating:false,message:'Last ChatGPT reply read'});
+  assert.equal(done.status,'read');
+  assert.equal(done.reply_text.slice(0,4),'PONG');
+  assert.equal(done.reply_text.length,20_000);
+  assert.equal(done.reply_generating,false);
+  const sent=await q.enqueue({action:'start',prompt:'x'});
+  await q.claim('desktop');
+  await assert.rejects(q.report('desktop',{job_id:sent.id,status:'read'}),/Only read jobs/);
 });
