@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { FileQueue } from './queue.mjs';
 
 const VERSION = '2025-11-25';
-const EFFORT_SCHEMA = { type: 'string', enum: ['auto', 'medium', 'high', 'xhigh'], description: 'Thinking effort: xhigh = Extra High.' };
+const EFFORT_SCHEMA = { type:'string',enum:['auto','medium','high','xhigh'],description:'Default xhigh = Extra High. Explicit auto can inherit the active model including Pro; avoid auto for cost-sensitive jobs.'};
 const PROPS = {
   prompt: {type:'string',minLength:1,maxLength:30000},
   effort: EFFORT_SCHEMA,
@@ -14,12 +14,24 @@ const PROPS = {
 };
 const TOOL_LIST = [
   {
-    name:'chatgpt_start', description:'Queue a new ordinary ChatGPT browser chat in the authenticated local Chrome. Returns job_id; use chatgpt_task_status to check delivery. Does not read model output.',
+    name:'chatgpt_start', description:'Queue a new ChatGPT chat in local Chrome. Defaults to Extra High (never implicitly selects Pro). Returns job_id immediately; inspect progress with chatgpt_task_status. Does not read model output.',
     inputSchema:{type:'object', properties:PROPS, required:['prompt'], additionalProperties:false},
   },
   {
-    name:'chatgpt_continue', description:'Queue a prompt into an existing ordinary ChatGPT chat. Never sends twice automatically after an uncertain delivery.',
-    inputSchema:{type:'object', properties:{...PROPS, chat_url:{type:'string',description:'Full https://chatgpt.com/c/... or project conversation URL'}}, required:['chat_url','prompt'], additionalProperties:false},
+    name:'chatgpt_continue', description:'Continue a known ChatGPT conversation by exact URL or saved chat_ref/slug/job ID. Defaults to Extra High. Returns job_id; inspect async progress. Never resends after uncertain delivery.',
+    inputSchema:{type:'object',properties:{...PROPS,chat_url:{type:'string',description:'Full exact ChatGPT conversation URL'},chat_ref:{type:'string',description:'Previously recorded conversation slug, full URL or job ID (instead of chat_url)'}},required:['prompt'],additionalProperties:false},
+  },
+  {
+    name:'chatgpt_open',description:'Open/reuse a specific existing ChatGPT conversation in owner Chrome WITHOUT sending a message. Asynchronous; check job status for opened or errors.',
+    inputSchema:{type:'object',properties:{chat_ref:{type:'string'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_list_chats',description:'List durable ChatGPT conversation URLs and slugs captured during automated work; no prompt/reply text. Survives server restarts.',
+    inputSchema:{type:'object',properties:{device_id:{type:'string'},limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_chat_status',description:'Resolve an exact ChatGPT URL, known slug, or job ID; see recorded URL and delivery metadata, never model response text.',
+    inputSchema:{type:'object',properties:{chat_ref:{type:'string'},device_id:{type:'string'}},required:['chat_ref'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Inspect local Chrome heartbeat, running and installed Git revisions, updater health, enabled state, and last dispatch. Does not read conversation content.',
@@ -98,8 +110,13 @@ export async function makeRelay({file, mcpToken, devices}) {
               if (!args.job_id) throw new Error('job_id is required');
               value=queue.status(args.job_id);
               if (!value) throw new Error('Job not found');
-            } else if (name==='chatgpt_start' || name==='chatgpt_continue') {
-              value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':'continue'});
+            } else if(name==='chatgpt_list_chats') {
+              value=queue.listChats(args.device_id||'desktop',args.limit||20);
+            } else if(name==='chatgpt_chat_status') {
+              if(!args.chat_ref)throw Error('chat_ref is required');
+              value=queue.chatStatus(args.chat_ref,args.device_id||'desktop');
+            } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
+              value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
             } else throw new Error('Unknown tool');
             out=rpcOk(data.id,resultText(value));
           } catch(err) {out=rpcOk(data.id,resultText({error:err.message},true));}
@@ -128,9 +145,10 @@ export async function makeRelay({file, mcpToken, devices}) {
           const data = await readJson(req);
           if(data?.type==='heartbeat') {
             const status=await queue.observeHeartbeat(deviceId,data,req.headers['x-launcher-revision']);
-            return send(res,200,{ok:true,reported_revision:status.active_revision,
-              commands_enabled:status.commands_enabled});
+            return send(res,200,{ok:true,reported_revision:status.active_revision,commands_enabled:status.commands_enabled});
           }
+          if(data?.type==='progress')return send(res,200,{job:await queue.progress(deviceId,data)});
+          if(data?.type==='chat_seen')return send(res,200,{chat:await queue.observeChat(deviceId,data)});
           return send(res,200,{job:await queue.report(deviceId,data)});
         }
         return send(res,405,{error:'Method not allowed'});
