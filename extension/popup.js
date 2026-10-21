@@ -1,5 +1,44 @@
 const $=id=>document.getElementById(id);
 const status=msg=>{$('status').textContent=msg;};
+let lastUpdaterCheckId=null;
+let manualUpdateTimer=null;
+let manualUpdateBaseline=null;
+let manualUpdateTries=0;
+function updaterSummary(info) {
+  const state=info?.state||'unknown';
+  if(state==='current') return 'Обновлений нет — установлена актуальная версия.';
+  if(state==='updated') return 'Новая версия установлена. Chrome должен её активировать.';
+  if(state==='checking') return 'Выполняется проверка обновлений GitHub…';
+  if(state==='error') return 'Ошибка проверки: '+(info.error_code||'неизвестная ошибка');
+  return 'Ожидание первой проверки обновлений.';
+}
+function stopUpdateWatch() {
+  if(manualUpdateTimer!==null) clearInterval(manualUpdateTimer);
+  manualUpdateTimer=null;
+}
+async function watchManualUpdate() {
+  manualUpdateTries++;
+  try {
+    const result=await chrome.runtime.sendMessage({type:'GET_UPDATE_STATUS'});
+    if(result?.error) throw new Error(result.error);
+    if(result?.check_id && result.check_id!==manualUpdateBaseline) {
+      status(updaterSummary(result));
+      if(['current','updated','error'].includes(result.state)) {
+        stopUpdateWatch();
+        await showVersion();
+        return;
+      }
+    }
+  } catch(err) {
+    stopUpdateWatch();
+    status('Не удалось прочитать результат обновления: '+err.message);
+    return;
+  }
+  if(manualUpdateTries>=55) {
+    stopUpdateWatch();
+    status('Нет подтверждения запуска обновлятора. Проверьте запрос Chrome на открытие приложения Windows.');
+  }
+}
 function isValidBase(raw) {
   const u=new URL(raw);
   if(u.username||u.password||u.search||u.hash) throw new Error('URL без параметров и паролей');
@@ -17,9 +56,9 @@ async function showVersion() {
   $('integrity').textContent=info.runtime_integrity==='ok' ? 'проверена' :
     info.runtime_integrity==='mismatch' ? 'несовпадение файлов' : 'не проверена';
   const updater=info.updater||{};
-  $('updateStatus').textContent=(updater.state||'unknown')+
-    (updater.checked_at ? ', '+updater.checked_at : '')+
-    (updater.error_code ? ', ошибка: '+updater.error_code : '');
+  lastUpdaterCheckId=updater.check_id||null;
+  $('updateStatus').textContent=updaterSummary(updater)+
+    (updater.checked_at ? ' Проверено: '+updater.checked_at : '');
   $('heartbeatStatus').textContent=info.last_connection_error ?
     'Ошибка: '+info.last_connection_error : (info.last_heartbeat_at || 'нет подтверждения');
 }
@@ -66,9 +105,15 @@ $('poll').addEventListener('click',async()=>{
   finally {$('poll').disabled=false;}
 });
 $('updateNow').addEventListener('click',()=>{
-  // User gesture navigates to the per-user registered Windows URL protocol.
-  // Do not preventDefault: Chrome must invoke the native OS handler.
-  status('Запускаю обновлятор Windows. Если Chrome попросит подтверждение, разрешите открытие приложения. После обновления Chrome перезапустит расширение.');
+  // Native click to a registered OS protocol; leave default navigation intact.
+  // The OS may request the user's approval to launch the registered app.
+  stopUpdateWatch();
+  manualUpdateBaseline=lastUpdaterCheckId;
+  manualUpdateTries=0;
+  status('Запрашиваю проверку обновлений. Если Chrome спросит разрешение открыть приложение Windows, подтвердите.');
+  // Only poll one tiny local JSON status file while THIS popup stays open.
+  // Reopening the popup later also shows the latest terminal result.
+  manualUpdateTimer=setInterval(()=>{void watchManualUpdate();},1200);
 });
 $('refresh').addEventListener('click',async()=>{
   try {await showVersion();} catch(err) {status('Ошибка: '+err.message);}
