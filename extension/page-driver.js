@@ -87,7 +87,7 @@
       if (!inserted) return false;
       el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
     }
-    return draftText(el).trim()===prompt.trim();
+    return core(draftText(el))===core(prompt);
   }
   function submitButton(input) {
     // Trust explicit send-button identity rather than page-wide generic buttons.
@@ -140,7 +140,7 @@
       const current=composer();
       // The app mention added after the prompt may render as a chip, so only
       // the prompt itself must still be there, unchanged, at the start.
-      if(current && !squash(draftText(current)).startsWith(squash(prompt))) {
+      if(current && !core(draftText(current)).startsWith(core(prompt))) {
         return {blocked:'Composer contents changed before submission'};
       }
       if(current) {
@@ -157,6 +157,21 @@
     return {blocked:'No safe Send button or unique ChatGPT composer form after 120 seconds'};
   }
   const squash = s => (s || '').replace(/\s+/g, ' ').trim();
+  // Letters and digits only: the ChatGPT editor reformats line breaks, quotes,
+  // dashes and arrows, but the words of the prompt stay the same.
+  function core(s) {
+    return (s || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  }
+  function clearComposer(el) {
+    el.focus();
+    const range=document.createRange();
+    range.selectNodeContents(el);
+    const selection=window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.execCommand('delete');
+    return !draftText(el).trim();
+  }
   function caretToEnd(el) {
     el.focus();
     const range=document.createRange();
@@ -208,7 +223,15 @@
     const before=window.location.href;
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
-    if (draftText(input).trim()) return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
+    if (draftText(input).trim()) {
+      // Our own earlier, unsent attempt with the same prompt may be lying here:
+      // replace it. Anybody else's draft is never touched.
+      const own=typeof job.own_text==='string' ? core(job.own_text).slice(0,200) : '';
+      if (own.length<8 || !core(draftText(input)).startsWith(own)) {
+        return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
+      }
+      if (!clearComposer(input)) return {status:'blocked',message:'Could not clear our own earlier unsent prompt'};
+    }
     // Never reload or interrupt: if ChatGPT is still answering here, wait for it.
     for (let i=0;i<360 && replyInProgress();i++) await sleep(500);
     if (replyInProgress()) return {status:'blocked',message:'ChatGPT was still answering in this conversation after 3 minutes; nothing was sent, try again later'};

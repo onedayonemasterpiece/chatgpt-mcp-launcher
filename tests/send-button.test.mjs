@@ -6,7 +6,7 @@ import {runInNewContext} from 'node:vm';
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
-                  transientUrls=[],answeringPolls=0,enterDelivers=false}={}) {
+                  transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
@@ -54,7 +54,8 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    },
    execCommand:(command,_show,text)=>{
      if(command==='insertParagraph'){editor.innerText+='\n';return true;}
-     assert.equal(command,'insertText');state.insertions++;editor.innerText+=text;return true;}
+     if(command==='delete'){state.deletes=(state.deletes||0)+1;editor.innerText='';return true;}
+     assert.equal(command,'insertText');state.insertions++;editor.innerText+=reformat(text);return true;}
  };
  const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'}),
      getSelection:()=>({removeAllRanges(){},addRange(){}})},
@@ -216,4 +217,28 @@ test('a malformed app name is never typed',async()=>{
  const result=await f.run({action:'start',prompt:'ping',effort:'auto',mention:'x<script>'});
  assert.equal(result.status,'sent');
  assert.equal(f.state.insertions,1);
+});
+
+test('a multi-line prompt reformatted by the editor is still recognised and sent',async()=>{
+ const f=fixture({reformat:t=>t.replace(/\n/g,'\n\n').replace(/->/g,'→').replace(/"/g,'«')});
+ const result=await f.run({action:'start',prompt:'Line one -> "x"\nLine two',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.clicks,1);
+});
+
+test('our own earlier unsent prompt is replaced, then sent once',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',
+   draft:'Next task: review the dataset (Служебное: old job id)'});
+ const result=await f.run({action:'continue',prompt:'Next task: review the dataset (Служебное: new job id)',
+   own_text:'Next task: review the dataset',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.deletes,1);
+ assert.equal(f.state.clicks,1);
+});
+
+test('someone else\'s draft is still never touched',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',draft:'my own notes'});
+ const result=await f.run({action:'continue',prompt:'Next task: review the dataset',own_text:'Next task: review the dataset',effort:'auto'});
+ assert.equal(result.status,'blocked');
+ assert.equal(f.editor.innerText,'my own notes');
 });
