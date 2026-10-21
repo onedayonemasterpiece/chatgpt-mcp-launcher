@@ -40,7 +40,7 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'updater.ps1') -Check -Root $root
           if ($LASTEXITCODE -ne 0) { throw 'On-demand update check failed' }
           $state = Get-Content -Raw (Join-Path $installed 'updater-status.json') | ConvertFrom-Json
-          if ($state.state -ne 'current' -or $state.interval_minutes -ne 15 -or !$state.check_id) { throw 'Unexpected updater status, missing check id or cadence' }
+          if ($state.state -ne 'current' -or $state.interval_minutes -ne 15 -or !$state.check_id -or $state.trigger -ne 'scheduled') { throw 'Unexpected updater status, origin or cadence' }
           $previousCheckId = $state.check_id
           & "$env:WINDIR\System32\cscript.exe" //B //NoLogo $helper
           if ($LASTEXITCODE -ne 0) { throw 'Silent script handler execution failed' }
@@ -50,6 +50,6 @@ jobs:
             $newState = Get-Content -Raw (Join-Path $installed 'updater-status.json') | ConvertFrom-Json
             if ($newState.check_id -ne $previousCheckId -and $newState.state -eq 'current') { break }
           }
-          if ($newState.check_id -eq $previousCheckId -or $newState.state -ne 'current') { throw 'No completion receipt from silent handler' }
+          if ($newState.check_id -eq $previousCheckId -or $newState.state -ne 'current' -or $newState.trigger -ne 'manual') { throw 'No distinct manual completion receipt from silent handler' }
           Write-Host ('PASS Windows install: '+$marker.revision)
           Write-Host 'PASS: silent per-user protocol, 15-minute schedule, SHA verification, manual UI-equivalent check with completion receipt'
