@@ -5,9 +5,9 @@ import {runInNewContext} from 'node:vm';
 
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
-                  noForm=false,draft='',href='https://chatgpt.com/'}={}) {
+                  noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/'}={}) {
  const location={href};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0};
+ const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -29,8 +29,11 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    querySelectorAll(selector) {
      if(selector==='[contenteditable="true"],textarea') return [editor];
      if(formOnly||noButton) return [];
-     if(selector==='button[data-testid="composer-send-button"]')
+     if(selector==='button[data-testid="composer-send-button"]') {
+       state.buttonChecks++;
+       if(state.buttonChecks<=delayedButtonPolls)return [];
        return ambiguous?[button,other]:[button];
+     }
      return [];
    },
    execCommand:(command,_show,prompt)=>{
@@ -52,6 +55,15 @@ test('ping submits using a unique composer Send button exactly once',async()=>{
  assert.equal(f.state.nativeSubmits,0);
  assert.equal(f.state.insertions,1);
  assert.equal(f.state.unrelatedClicks,0);
+});
+
+test('Send control appearing after a simulated 85 seconds still launches once',async()=>{
+ const f=fixture({noForm:true,delayedButtonPolls:340});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.ok(f.state.buttonChecks>340);
+ assert.equal(f.state.clicks,1);
+ assert.equal(f.state.nativeSubmits,0);
 });
 
 test('unlabelled form submit button works when tied to identified composer',async()=>{
