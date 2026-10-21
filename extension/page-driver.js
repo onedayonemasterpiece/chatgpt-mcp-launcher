@@ -112,8 +112,9 @@
     const form=input?.closest('form')||null;
     const within=form ? trusted.filter(button=>form.contains(button)) : [];
     if(within.length===1) return within[0];
-    if(within.length>1) return null; // avoid an ambiguous choice
+    if(within.length>1) return {blocked:'Ambiguous Send controls inside the ChatGPT composer'};
     if(trusted.length===1) return trusted[0];
+    if(trusted.length>1) return {blocked:'Multiple Send controls found outside the composer form'};
     // Some ChatGPT composer forms use an unlabeled submit button.
     // Only accept it if it is the sole submit button inside THIS editor's form.
     if(trusted.length===0 && form) {
@@ -152,6 +153,7 @@
       }
       if(current) {
         const button=submitButton(current);
+        if(button?.blocked) return button;
         if(button) return {button,editor:current};
         // A form's requestSubmit() asks the browser to run its native submit
         // pathway (including React's onSubmit). Unlike dispatchEvent of a
