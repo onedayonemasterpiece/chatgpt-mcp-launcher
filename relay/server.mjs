@@ -120,6 +120,7 @@ export async function makeRelay({file, mcpToken, devices}) {
           const verified=status.heartbeat_current_session &&
             status.commands_enabled===true && status.active_revision &&
             status.installed_revision===status.active_revision &&
+            req.headers['x-launcher-revision']===status.active_revision &&
             status.runtime_integrity==='ok';
           return send(res,200,{job:verified ? await queue.claim(deviceId) : null});
         }

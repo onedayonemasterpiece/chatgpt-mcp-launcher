@@ -49,6 +49,8 @@ test('MCP -> local Chrome queue protocol, idempotency, security, persistence',as
    runtime_loaded_at:new Date().toISOString(),updater:{state:'current'},
  }),{...devHeaders,'X-Launcher-Revision':'a'.repeat(40),'Content-Type':'application/json'});
  assert.equal(ready.status,200);
+ const staleWorker=await req('/device/poll','GET',null,{...devHeaders,'X-Launcher-Revision':'f'.repeat(40)});
+ assert.equal(staleWorker.data.job,null,'legacy stale worker cannot claim tasks after a new worker heartbeat');
  out=await req('/device/poll','GET',null,{...devHeaders,'X-Launcher-Revision':'a'.repeat(40)});
  assert.equal(out.data.job.id,job.id);
  assert.equal(out.data.job.prompt,'Check the project');
