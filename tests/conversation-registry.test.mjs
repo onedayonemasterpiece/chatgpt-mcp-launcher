@@ -101,3 +101,9 @@ test('a final report with an odd URL is accepted without the URL instead of wedg
   assert.equal((await q.report('desktop',{job_id:other.id,status:'sent',chat_url:'https://evil.test/c/'+ID})).result_chat_url,null);
   assert.equal(q.listChats().total,0);
 });
+
+test('a temporary local ChatGPT address is never stored as a slug',()=>{
+  for(const url of ['https://chatgpt.com/c/local-abc123456','https://chatgpt.com/local/'+ID,'https://chatgpt.com/c/LOCAL-abc123456'])
+    assert.equal(canonicalChatUrl(url),null,url);
+  assert.equal(referenceToUrl('local-abc123456'),null);
+});

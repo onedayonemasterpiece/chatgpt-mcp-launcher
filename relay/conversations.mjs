@@ -1,7 +1,8 @@
 // Pure, privacy-minimal ChatGPT conversation identity helpers.
 // This module never reads page content, model output or browser cookies.
 export const MAX_CHATS=2000;
-const ID=/^[a-zA-Z0-9-]{8,90}$/;
+// ChatGPT shows a temporary "local" ID before the real one exists.
+const ID=/^(?!local)[a-zA-Z0-9-]{8,90}$/i;
 const PROJECT=/^[a-zA-Z0-9-]{5,160}$/;
 export function canonicalChatUrl(input) {
   if(typeof input!=='string' || input.length>1000) return null;

@@ -166,7 +166,9 @@
     return {blocked:'No safe Send button or unique ChatGPT composer form after 120 seconds'};
   }
   function isConversationUrl(value) {
-    try { const u = new URL(value); return u.origin === 'https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname); }
+    // ChatGPT first shows a temporary "local" address for a new chat; never treat it as the slug.
+    try { const u = new URL(value); return u.origin === 'https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname) &&
+      !/(?:^|\/)local/i.test(u.pathname); }
     catch { return false; }
   }
   function chatUrl() {
@@ -213,10 +215,16 @@
     }
     // After submitting, an ambiguous UI outcome must NOT cause another submit.
     // A new chat can take a while to get its /c/ address: wait up to 60 seconds.
+    let seen=null,stable=0;
     for(let i=0;i<150;i++) {
       await sleep(400);
-      if(job.action==='start' && isConversationUrl(window.location.href)) {
-        return {status:'sent',chat_url:chatUrl(),message:`New chat created via ${method}.`+effortNote};
+      // The address of a new chat changes a few times; report it only once it
+      // has stayed the same for about two seconds.
+      const url=chatUrl();
+      stable=url && url===seen ? stable+1 : 0;
+      seen=url;
+      if(job.action==='start' && url && stable>=5) {
+        return {status:'sent',chat_url:url,message:`New chat created via ${method}.`+effortNote};
       }
       if(job.action==='continue' && isConversationUrl(window.location.href)) {
         const now=composer();

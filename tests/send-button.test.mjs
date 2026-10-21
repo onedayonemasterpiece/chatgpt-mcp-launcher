@@ -5,8 +5,13 @@ import {runInNewContext} from 'node:vm';
 
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
-                  noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/'}={}) {
- const location={href};
+                  noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
+                  transientUrls=[]}={}) {
+ // Each read of a transient address counts as time passing; the final one stays.
+ let current=href; const queue=[];
+ const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
+     return queue.length?queue[0].url:current;},
+   set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
  const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
@@ -126,4 +131,13 @@ test('an existing user draft is never overwritten',async()=>{
  assert.equal(f.editor.innerText,'my unsent text');
  assert.equal(f.state.insertions,0);
  assert.equal(f.state.clicks+f.state.nativeSubmits,0);
+});
+
+test('a new chat reports the final slug, never a temporary local or intermediate address',async()=>{
+ const f=fixture({transientUrls:['https://chatgpt.com/local/abc123456','https://chatgpt.com/c/local-abc123456',
+   'https://chatgpt.com/c/ffff0000-temp']});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(result.chat_url,'https://chatgpt.com/c/abcd1234');
+ assert.equal(f.state.clicks,1);
 });
