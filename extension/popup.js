@@ -21,7 +21,7 @@ async function watchManualUpdate() {
   try {
     const result=await chrome.runtime.sendMessage({type:'GET_UPDATE_STATUS'});
     if(result?.error) throw new Error(result.error);
-    if(result?.check_id && result.check_id!==manualUpdateBaseline) {
+    if(result?.check_id && result.check_id!==manualUpdateBaseline && result.trigger==='manual') {
       status(updaterSummary(result));
       if(['current','updated','error'].includes(result.state)) {
         stopUpdateWatch();
@@ -57,7 +57,7 @@ async function showVersion() {
     info.runtime_integrity==='mismatch' ? 'несовпадение файлов' : 'не проверена';
   const updater=info.updater||{};
   lastUpdaterCheckId=updater.check_id||null;
-  $('updateStatus').textContent=updaterSummary(updater)+
+  $('updateStatus').textContent=(updater.trigger==='manual' ? 'Ручная проверка. ' : updater.trigger==='scheduled' ? 'Автоматическая проверка. ' : '')+updaterSummary(updater)+
     (updater.checked_at ? ' Проверено: '+updater.checked_at : '');
   $('heartbeatStatus').textContent=info.last_connection_error ?
     'Ошибка: '+info.last_connection_error : (info.last_heartbeat_at || 'нет подтверждения');
