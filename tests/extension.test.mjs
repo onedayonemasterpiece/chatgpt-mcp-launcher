@@ -32,5 +32,27 @@ try {
   assert.equal(await page.evaluate(()=>window.sentCount), 2);
   assert.match(await page.locator('#model').innerText(), /Высокий/);
   assert.equal((await page.locator('#other-input').innerText()).trim(),"user's unrelated draft");
-  console.log('PASS: start, continue, medium/high effort, uniquely selected primary composer, no draft overwrite');
+  // Exercise the REAL browser's HTMLFormElement.requestSubmit() pathway,
+  // not a mocked KeyboardEvent: native submit events must reach listeners.
+  await page.setContent(`<!doctype html><html><body>
+    <form id="composer-form">
+      <div id="prompt-textarea" contenteditable="true" data-testid="composer-text-input"
+           aria-label="Ask ChatGPT" style="display:block;width:320px;min-height:50px;border:1px solid"></div>
+      <button type="button" id="other" aria-label="Voice">Mic</button>
+    </form>
+    <script>
+      window.nativeSubmissions=0;
+      document.getElementById('composer-form').addEventListener('submit',event=>{
+        event.preventDefault();
+        window.nativeSubmissions++;
+        document.getElementById('prompt-textarea').textContent='';
+      });
+    </script></body></html>`);
+  await page.addScriptTag({content:driver});
+  const native=await page.evaluate(()=>window.chatGPTLauncherRun({action:'start',prompt:'native-form-ping',effort:'auto'}));
+  assert.equal(native.status,'sent',JSON.stringify(native));
+  assert.match(native.message,/Native form submit/);
+  assert.equal(await page.evaluate(()=>window.nativeSubmissions),1,'real browser delivered native submit exactly once');
+  assert.equal((await page.locator('#prompt-textarea').innerText()).trim(),'');
+  console.log('PASS: native browser form requestSubmit delivered once with unlabeled Send control');
 } finally { await browser.close(); }

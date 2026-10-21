@@ -112,8 +112,9 @@
     const form=input?.closest('form')||null;
     const within=form ? trusted.filter(button=>form.contains(button)) : [];
     if(within.length===1) return within[0];
-    if(within.length>1) return null; // avoid an ambiguous choice
+    if(within.length>1) return {blocked:'Ambiguous Send controls inside the ChatGPT composer'};
     if(trusted.length===1) return trusted[0];
+    if(trusted.length>1) return {blocked:'Multiple Send controls found outside the composer form'};
     // Some ChatGPT composer forms use an unlabeled submit button.
     // Only accept it if it is the sole submit button inside THIS editor's form.
     if(trusted.length===0 && form) {
@@ -132,24 +133,37 @@
     }
     return null;
   }
-  async function waitForSend(input) {
-    // Allow React's async composer state to enable its Send control.
-    for(let i=0;i<20;i++) {
-      const el=submitButton(input);
-      if(el) return el;
+  function composerForm(el) {
+    const form=el?.closest?.('form');
+    if(!form || !form.isConnected || !form.contains(el) ||
+       typeof form.requestSubmit!=='function') return null;
+    // Form submission is only allowed when we can prove this is the one
+    // ChatGPT composer in that form, not a sidebar or unrelated modal.
+    const editors=[...form.querySelectorAll('[contenteditable="true"],textarea')]
+      .filter(visible);
+    return editors.length===1 && editors[0]===el ? form : null;
+  }
+  async function waitForSend(input,prompt) {
+    // ChatGPT can hydrate the Send button well after the composer itself.
+    // Never consider the submission safe if the text or editor changes.
+    for(let i=0;i<480;i++) {
+      const current=composer();
+      if(current && draftText(current).trim()!==prompt.trim()) {
+        return {blocked:'Composer contents changed before submission'};
+      }
+      if(current) {
+        const button=submitButton(current);
+        if(button?.blocked) return button;
+        if(button) return {button,editor:current};
+        // A form's requestSubmit() asks the browser to run its native submit
+        // pathway (including React's onSubmit). Unlike dispatchEvent of a
+        // KeyboardEvent, this does not pretend a synthetic Enter is trusted.
+        const form=composerForm(current);
+        if(form && i>=40) return {form,editor:current};
+      }
       await sleep(250);
     }
-    return null;
-  }
-  function pressEnter(el) {
-    // ChatGPT submits on Enter. One attempt only, and only into the focused composer.
-    el.focus();
-    const active=document.activeElement;
-    if (active!==el && !(active && el.contains?.(active))) return false;
-    const init={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
-    el.dispatchEvent(new KeyboardEvent('keydown',init));
-    el.dispatchEvent(new KeyboardEvent('keyup',init));
-    return true;
+    return {blocked:'No safe Send button or unique ChatGPT composer form after 120 seconds'};
   }
   function isConversationUrl(value) {
     try { const u = new URL(value); return u.origin === 'https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname); }
@@ -179,11 +193,24 @@
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
-    const send=await waitForSend(ready);
-    let method='Send button';
-    if (send) send.click();
-    else if (pressEnter(ready)) method='Enter';
-    else return {status:'blocked',message:'Prompt entered, but no unique Send button and the composer could not be focused for Enter; draft left for manual review'};
+    const submit=await waitForSend(ready,job.prompt);
+    if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
+    let method;
+    try {
+      if(submit.button) {
+        // Click only the unique composer Send button, once.
+        submit.button.click();
+        method='Send button';
+      } else if(submit.form) {
+        // One browser-native form submission, not fabricated keydown/keyup.
+        submit.form.requestSubmit();
+        method='Native form submit';
+      } else {
+        return {status:'blocked',message:'No safe native submission path'};
+      }
+    } catch(err) {
+      return {status:'needs_review',message:'Submission attempt threw an error; do not retry automatically: '+String(err?.message||err).slice(0,100)};
+    }
     // After submitting, an ambiguous UI outcome must NOT cause another submit.
     // A new chat can take a while to get its /c/ address: wait up to 60 seconds.
     for(let i=0;i<150;i++) {
