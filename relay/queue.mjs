@@ -6,6 +6,9 @@ import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} fr
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
 const REPORT_STATES = ['sent','opened','read','blocked','failed','needs_review'];
 const MAX_REPLY = 20_000;
+// No job may stay "in progress" forever: after this long it gets a final status.
+const STALE_MS = 15 * 60_000;
+const TERMINAL = ['sent','opened','read','blocked','failed','needs_review','expired'];
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -20,6 +23,33 @@ export function validChatUrl(value) {
       /^\/(?:g\/[^/]+\/)?c\/[a-zA-Z0-9-]+\/?$/.test(url.pathname) &&
       !url.username && !url.password && !url.search && !url.hash;
   } catch { return false; }
+}
+
+// One plain instruction per state, so a calling agent always knows what to do next.
+function nextStep(job) {
+  switch(job.status) {
+    case 'queued': case 'claimed':
+      return 'In progress in the owner\'s Chrome. Call chatgpt_task_status again in about 20 seconds. Do not repeat the request. '+
+        'If Chrome does not finish within 15 minutes, the job gets a final status automatically.';
+    case 'expired':
+      return 'Chrome did not pick this job up within 15 minutes, so nothing was sent. Check chatgpt_device_status, then repeat the call with a new request_id.';
+    case 'sent':
+      return 'Delivered (not yet answered). To get the answer, wait about a minute, then call chatgpt_read_reply with chat_ref = chat_id.';
+    case 'opened':
+      return 'The conversation is open in Chrome. Nothing was sent.';
+    case 'read':
+      if(job.reply_generating) return 'ChatGPT is still writing. Call chatgpt_read_reply again in about 30 seconds.';
+      // last_user_text tells whether a prompt sent earlier actually arrived.
+      return job.reply_text ? 'reply_text holds the last ChatGPT reply.' :
+        'No reply yet. If a prompt was just sent, call chatgpt_read_reply again in about 30 seconds.';
+    case 'blocked':
+      return 'Nothing was sent. Read message for the reason; fix it or report it to the owner before trying again with a new request_id.';
+    case 'needs_review':
+      return 'The prompt may or may not have been sent. Do NOT resend blindly: call chatgpt_read_reply for this chat and compare last_user_text with your prompt. '+
+        'If it is there, it was sent; if not, send it with chatgpt_continue and a new request_id.';
+    default:
+      return 'Failed. Read message and report it to the owner.';
+  }
 }
 
 function requireString(value, name, maxLen = 256) {
@@ -176,7 +206,7 @@ export class FileQueue {
       let target=null;
       if(action!=='start') {
         target=hasUrl?canonicalChatUrl(args.chat_url):this.resolveChat(args.chat_ref,deviceId);
-        if(!target)throw Error('Unknown or invalid ChatGPT conversation reference');
+        if(!target)throw Error('Unknown or invalid ChatGPT conversation reference. Pass the chat_id from chatgpt_task_status or chatgpt_list_chats, or a full https://chatgpt.com/c/... URL');
       }
       if(args.slack_thread_url!==undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url))
         throw Error('Invalid Slack thread URL');
@@ -189,8 +219,9 @@ export class FileQueue {
           return this.#public(existing);
         }
       }
+      this.#expire();
       if(this.#state.jobs.length>=MAX_JOBS) {
-        const removable=this.#state.jobs.findIndex(j=>['sent','opened','read','failed','blocked'].includes(j.status));
+        const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status));
         if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
         this.#state.jobs.splice(removable,1);
       }
@@ -233,16 +264,39 @@ export class FileQueue {
   #public(job) {
     if (!job) return null;
     const {prompt, ...publicJob} = job;
-    return {...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url)};
+    return {job_id:job.id,...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
+      next_step:nextStep(job)};
   }
   status(jobId) {
+    if(this.#expire()) void this.#run(()=>this.#save());
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
+  }
+  // Gives every job that has waited too long a final, unambiguous status.
+  #expire(now=Date.now()) {
+    let changed=false;
+    for(const job of this.#state.jobs) {
+      const since=Date.parse(job.status==='queued' ? job.created_at : job.claimed_at);
+      if(!['queued','claimed'].includes(job.status) || !(now-since>STALE_MS)) continue;
+      const at=new Date(now).toISOString();
+      if(job.status==='queued') {
+        Object.assign(job,{status:'expired',reported_at:at,
+          message:'Chrome did not pick this job up within 15 minutes; nothing was sent'});
+      } else {
+        const sends=job.action==='start'||job.action==='continue';
+        Object.assign(job,{status:sends?'needs_review':'failed',timed_out:true,reported_at:at,
+          message:sends ? 'Chrome did not report back within 15 minutes; the prompt may or may not have been sent' :
+            'Chrome did not report back within 15 minutes; nothing was sent, repeating is safe'});
+      }
+      changed=true;
+    }
+    return changed;
   }
   counts() {
     return this.#state.jobs.reduce((o,j)=>{o[j.status]=(o[j.status]||0)+1;return o;},{});
   }
   async claim(deviceId) {
     return this.#run(async()=>{
+      if(this.#expire()) await this.#save(); // an expired prompt must never be handed out
       const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
       if(!job)return null;
       job.status='claimed';
@@ -260,10 +314,12 @@ export class FileQueue {
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
       if(data.status==='read' && job.action!=='read')throw Error('Only read jobs can report read');
       if(['open','read'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
-      if(job.status!=='claimed') {
+      // A late real report replaces the status given on timeout: it is more accurate.
+      if(job.status!=='claimed' && !job.timed_out) {
         if(job.status===data.status)return this.#public(job);
         throw Error('Job is not claimed');
       }
+      job.timed_out=false;
       // Rejecting a final report would wedge the browser worker, so an invalid
       // or unexpected URL is dropped instead of failing the whole report.
       let url=canonicalChatUrl(data.chat_url);
@@ -275,6 +331,7 @@ export class FileQueue {
       if(job.action==='read') {
         job.reply_text=typeof data.reply_text==='string'?data.reply_text.slice(0,MAX_REPLY):null;
         job.reply_generating=data.reply_generating===true;
+        job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
       job.reported_at=new Date().toISOString();
       await this.#save();

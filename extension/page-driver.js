@@ -252,10 +252,18 @@
     await sleep(1000);
     const text=lastReply();
     const busy=replyInProgress();
+    // The last user message shows whether a prompt sent earlier really arrived.
+    const users=[...document.querySelectorAll('[data-message-author-role="user"]')];
+    const asked=(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
     return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,
+      last_user_text:asked ? asked.slice(0,2000) : null,
       message:!text ? 'No ChatGPT reply in this conversation yet' :
         busy ? 'ChatGPT is still writing this reply; read again later' : 'Last ChatGPT reply read'};
   }
   globalThis.chatGPTLauncherRun = run;
   globalThis.chatGPTLauncherRead = read;
+  globalThis.chatGPTLauncherProbe = () => {
+    const el=composer();
+    return {draft:!!(el && draftText(el).trim()),generating:replyInProgress()};
+  };
 })();
