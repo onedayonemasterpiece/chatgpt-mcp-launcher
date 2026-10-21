@@ -89,21 +89,39 @@
     }
     return draftText(el).trim()===prompt.trim();
   }
-  function submitButton() {
-    const selectors = [
+  function submitButton(input) {
+    // Trust explicit send-button identity rather than page-wide generic buttons.
+    // This covers both the older and newer ChatGPT composer naming patterns.
+    const trustedSelectors=[
       'button[data-testid="send-button"]',
+      'button[data-testid="composer-send-button"]',
+      'button[data-testid="composer-submit-button"]',
+      'button[id="composer-submit-button"]',
+      'button[id="send-button"]',
       'button[aria-label="Отправить сообщение"]',
       'button[aria-label="Отправить"]',
       'button[aria-label="Send message"]',
       'button[aria-label="Send prompt"]',
       'button[aria-label="Send"]',
       'button[title="Send message"]',
+      'button[title="Отправить"]',
     ];
-    const matches=selectors.flatMap(s=>[...document.querySelectorAll(s)])
-      .filter(b=>visible(b) && !b.disabled);
-    // Ambiguous Send buttons can belong to unrelated dialogs.
-    const unique=[...new Set(matches)];
-    return unique.length===1 ? unique[0] : null;
+    const trusted=[...new Set(trustedSelectors.flatMap(selector=>
+      [...document.querySelectorAll(selector)]))].filter(button=>
+      visible(button) && !button.disabled);
+    const form=input?.closest('form')||null;
+    const within=form ? trusted.filter(button=>form.contains(button)) : [];
+    if(within.length===1) return within[0];
+    if(within.length>1) return null; // avoid an ambiguous choice
+    if(trusted.length===1) return trusted[0];
+    // Some ChatGPT composer forms use an unlabeled submit button.
+    // Only accept it if it is the sole submit button inside THIS editor's form.
+    if(trusted.length===0 && form) {
+      const scoped=[...form.querySelectorAll('button[type="submit"]')]
+        .filter(button=>visible(button) && !button.disabled);
+      if(scoped.length===1) return scoped[0];
+    }
+    return null;
   }
   async function waitForComposer() {
     // Slow ChatGPT hydration can take up to a minute. Wait 90 seconds.
@@ -114,9 +132,10 @@
     }
     return null;
   }
-  async function waitForSend() {
-    for(let i=0;i<20;i++) {
-      const el=submitButton();
+  async function waitForSend(input) {
+    // Allow React's async composer state to enable its Send control.
+    for(let i=0;i<80;i++) {
+      const el=submitButton(input);
       if(el) return el;
       await sleep(250);
     }
@@ -142,8 +161,8 @@
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
-    const send=await waitForSend();
-    if (!send) return {status:'blocked',message:'Prompt entered but send button missing; review the draft manually'};
+    const send=await waitForSend(ready);
+    if (!send) return {status:'blocked',message:'Prompt entered but no unique enabled Send control was found after 20 seconds; leave the draft untouched for manual review'};
     send.click();
     // After clicking Send, an ambiguous UI outcome must NOT cause another Send.
     for(let i=0;i<40;i++) {
