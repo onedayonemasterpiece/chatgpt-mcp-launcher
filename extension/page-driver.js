@@ -160,6 +160,9 @@
         // KeyboardEvent, this does not pretend a synthetic Enter is trusted.
         const form=composerForm(current);
         if(form && i>=40) return {form,editor:current};
+        // No Send button and no composer form after 90 s (a slow page can draw the
+        // button late): ChatGPT submits on Enter, so press it once (owner decision).
+        if(!form && i>=360) return {enter:true,editor:current};
       }
       await sleep(250);
     }
@@ -206,6 +209,13 @@
         // Click only the unique composer Send button, once.
         submit.button.click();
         method='Send button';
+      } else if(submit.enter) {
+        // One Enter into the composer itself, once; delivery is verified below.
+        submit.editor.focus();
+        const init={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
+        submit.editor.dispatchEvent(new KeyboardEvent('keydown',init));
+        submit.editor.dispatchEvent(new KeyboardEvent('keyup',init));
+        method='Enter';
       } else if(submit.form) {
         // One browser-native form submission, not fabricated keydown/keyup.
         submit.form.requestSubmit();
