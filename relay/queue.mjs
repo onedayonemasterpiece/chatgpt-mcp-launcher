@@ -353,7 +353,17 @@ export class FileQueue {
       if(['open','read'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
       if(job.status!=='claimed' && !job.timed_out) {
-        if(job.status===data.status)return this.#public(job);
+        if(job.status===data.status) {
+          // ChatGPT may confirm via chatgpt_report before Chrome reports back:
+          // still take the conversation address from Chrome's report.
+          const late=canonicalChatUrl(data.chat_url);
+          if(late && !job.result_chat_url && (!job.chat_url || late===job.chat_url)) {
+            job.result_chat_url=late;
+            this.#recordChat(late,deviceId,id,data.status);
+            await this.#save();
+          }
+          return this.#public(job);
+        }
         throw Error('Job is not claimed');
       }
       job.timed_out=false;

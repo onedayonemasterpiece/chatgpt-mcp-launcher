@@ -201,3 +201,14 @@ test('ChatGPT confirms through MCP: started resolves uncertainty, done carries t
   await q.claim('desktop');
   await assert.rejects(q.modelReport({job_id:open.id,status:'started'}),/Unknown job_id/);
 });
+test('the chat address is kept when ChatGPT confirms before Chrome reports back',async t=>{
+  const {q}=await setup(t);
+  const task=await q.enqueue({action:'start',prompt:'ping'});
+  await q.claim('desktop');
+  await q.modelReport({job_id:task.id,status:'done',summary:'PONG'});
+  assert.equal(q.status(task.id).status,'sent');
+  const late=await q.report('desktop',{job_id:task.id,status:'sent',chat_url:URL});
+  assert.equal(late.chat_id,ID);
+  assert.equal(late.model_summary,'PONG');
+  assert.equal(q.listChats().chats[0].chat_id,ID);
+});
