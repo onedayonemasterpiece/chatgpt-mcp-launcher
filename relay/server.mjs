@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { FileQueue } from './queue.mjs';
 
 const VERSION = '2025-11-25';
-const EFFORT_SCHEMA = { type:'string',enum:['auto','medium','high','xhigh'],description:'Default xhigh = Extra High. Explicit auto can inherit the active model including Pro; avoid auto for cost-sensitive jobs.'};
+const EFFORT_SCHEMA = { type:'string',enum:['auto','medium','high','xhigh'],description:'Optional. Default auto keeps the level already selected in ChatGPT. An explicit level is tried once; if it cannot be selected the prompt is still sent.'};
 const PROPS = {
   prompt: {type:'string',minLength:1,maxLength:30000},
   effort: EFFORT_SCHEMA,
@@ -14,31 +14,27 @@ const PROPS = {
 };
 const TOOL_LIST = [
   {
-    name:'chatgpt_start', description:'Queue a new ChatGPT chat in local Chrome. Defaults to Extra High (never implicitly selects Pro). Returns job_id immediately; inspect progress with chatgpt_task_status. Does not read model output.',
+    name:'chatgpt_start', description:'Queue a new ChatGPT chat in local Chrome. Returns job_id immediately; chatgpt_task_status later gives the new chat_url and chat_id (slug). Does not read model output.',
     inputSchema:{type:'object', properties:PROPS, required:['prompt'], additionalProperties:false},
   },
   {
-    name:'chatgpt_continue', description:'Continue a known ChatGPT conversation by exact URL or saved chat_ref/slug/job ID. Defaults to Extra High. Returns job_id; inspect async progress. Never resends after uncertain delivery.',
-    inputSchema:{type:'object',properties:{...PROPS,chat_url:{type:'string',description:'Full exact ChatGPT conversation URL'},chat_ref:{type:'string',description:'Previously recorded conversation slug, full URL or job ID (instead of chat_url)'}},required:['prompt'],additionalProperties:false},
+    name:'chatgpt_continue', description:'Send a prompt into an existing ChatGPT conversation by chat_ref (slug, full URL or the job_id that created it) or chat_url. Reuses the open tab or opens it. Returns job_id; never resends after uncertain delivery.',
+    inputSchema:{type:'object',properties:{...PROPS,chat_url:{type:'string',description:'Full exact ChatGPT conversation URL'},chat_ref:{type:'string',description:'Conversation slug, full URL or job ID (instead of chat_url)'}},required:['prompt'],additionalProperties:false},
   },
   {
-    name:'chatgpt_open',description:'Open/reuse a specific existing ChatGPT conversation in owner Chrome WITHOUT sending a message. Asynchronous; check job status for opened or errors.',
-    inputSchema:{type:'object',properties:{chat_ref:{type:'string'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
+    name:'chatgpt_open',description:'Bring an existing ChatGPT conversation to the front in local Chrome (reuse its tab or open it) WITHOUT sending anything. Pass exactly one of chat_ref or chat_url. Returns job_id.',
+    inputSchema:{type:'object',properties:{chat_ref:{type:'string',description:'Conversation slug, full URL or job ID'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
   },
   {
-    name:'chatgpt_list_chats',description:'List durable ChatGPT conversation URLs and slugs captured during automated work; no prompt/reply text. Survives server restarts.',
+    name:'chatgpt_list_chats',description:'List ChatGPT conversations (chat_url, chat_id slug, job IDs) started or continued through this launcher, newest first. Survives restarts. No prompt or reply text.',
     inputSchema:{type:'object',properties:{device_id:{type:'string'},limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false},
-  },
-  {
-    name:'chatgpt_chat_status',description:'Resolve an exact ChatGPT URL, known slug, or job ID; see recorded URL and delivery metadata, never model response text.',
-    inputSchema:{type:'object',properties:{chat_ref:{type:'string'},device_id:{type:'string'}},required:['chat_ref'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Inspect local Chrome heartbeat, running and installed Git revisions, updater health, enabled state, and last dispatch. Does not read conversation content.',
     inputSchema:{type:'object',properties:{device_id:{type:'string'}},additionalProperties:false},
   },
   {
-    name:'chatgpt_task_status', description:'Check delivery status of a queued browser action (queued/claimed/sent/blocked/failed/needs_review), with final chat URL when known.',
+    name:'chatgpt_task_status', description:'Check delivery status of a queued browser action (queued/claimed/sent/opened/blocked/failed/needs_review), with chat_url and chat_id (slug) when known. Sent means delivered, not answered.',
     inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false},
   },
 ];
@@ -112,9 +108,6 @@ export async function makeRelay({file, mcpToken, devices}) {
               if (!value) throw new Error('Job not found');
             } else if(name==='chatgpt_list_chats') {
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
-            } else if(name==='chatgpt_chat_status') {
-              if(!args.chat_ref)throw Error('chat_ref is required');
-              value=queue.chatStatus(args.chat_ref,args.device_id||'desktop');
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
             } else throw new Error('Unknown tool');
@@ -147,8 +140,6 @@ export async function makeRelay({file, mcpToken, devices}) {
             const status=await queue.observeHeartbeat(deviceId,data,req.headers['x-launcher-revision']);
             return send(res,200,{ok:true,reported_revision:status.active_revision,commands_enabled:status.commands_enabled});
           }
-          if(data?.type==='progress')return send(res,200,{job:await queue.progress(deviceId,data)});
-          if(data?.type==='chat_seen')return send(res,200,{chat:await queue.observeChat(deviceId,data)});
           return send(res,200,{job:await queue.report(deviceId,data)});
         }
         return send(res,405,{error:'Method not allowed'});

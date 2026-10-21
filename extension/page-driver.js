@@ -134,16 +134,32 @@
   }
   async function waitForSend(input) {
     // Allow React's async composer state to enable its Send control.
-    for(let i=0;i<80;i++) {
+    for(let i=0;i<20;i++) {
       const el=submitButton(input);
       if(el) return el;
       await sleep(250);
     }
     return null;
   }
+  function pressEnter(el) {
+    // ChatGPT submits on Enter. One attempt only, and only into the focused composer.
+    el.focus();
+    const active=document.activeElement;
+    if (active!==el && !(active && el.contains?.(active))) return false;
+    const init={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};
+    el.dispatchEvent(new KeyboardEvent('keydown',init));
+    el.dispatchEvent(new KeyboardEvent('keyup',init));
+    return true;
+  }
   function isConversationUrl(value) {
     try { const u = new URL(value); return u.origin === 'https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname); }
     catch { return false; }
+  }
+  function chatUrl() {
+    // Report the address without query/fragment; null until ChatGPT shows /c/.
+    if (!isConversationUrl(window.location.href)) return null;
+    const u=new URL(window.location.href);
+    return u.origin+u.pathname.replace(/\/+$/,'');
   }
   async function run(job) {
     if (!job || !['start','continue'].includes(job.action) || !job.prompt || job.prompt.length > 35000) {
@@ -156,27 +172,32 @@
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
     if (draftText(input).trim()) return {status:'blocked',message:'An unsent draft already exists; not overwriting it'};
+    // A launch matters more than the effort level: ChatGPT keeps the last
+    // selected level, so a picker that cannot be verified never blocks the send.
     const effortResult=await setEffort(job.effort || 'auto');
-    if (!effortResult.ok) return {status:'blocked',message:effortResult.message};
+    const effortNote=effortResult.ok ? '' : ` Effort left unchanged: ${effortResult.message}.`;
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
     const send=await waitForSend(ready);
-    if (!send) return {status:'blocked',message:'Prompt entered but no unique enabled Send control was found after 20 seconds; leave the draft untouched for manual review'};
-    send.click();
-    // After clicking Send, an ambiguous UI outcome must NOT cause another Send.
-    for(let i=0;i<40;i++) {
+    let method='Send button';
+    if (send) send.click();
+    else if (pressEnter(ready)) method='Enter';
+    else return {status:'blocked',message:'Prompt entered, but no unique Send button and the composer could not be focused for Enter; draft left for manual review'};
+    // After submitting, an ambiguous UI outcome must NOT cause another submit.
+    // A new chat can take a while to get its /c/ address: wait up to 60 seconds.
+    for(let i=0;i<150;i++) {
       await sleep(400);
       if(job.action==='start' && isConversationUrl(window.location.href)) {
-        return {status:'sent',chat_url:window.location.href,message:'New chat created'};
+        return {status:'sent',chat_url:chatUrl(),message:`New chat created via ${method}.`+effortNote};
       }
       if(job.action==='continue' && isConversationUrl(window.location.href)) {
         const now=composer();
-        if (now && !draftText(now).trim()) return {status:'sent',chat_url:window.location.href,message:'Composer cleared after Send'};
+        if (now && !draftText(now).trim()) return {status:'sent',chat_url:chatUrl(),message:`Composer cleared after ${method}.`+effortNote};
       }
     }
-    return {status:'needs_review',chat_url:isConversationUrl(window.location.href) ? window.location.href : null,
-      message:`Clicked Send, but completion was not verified (previous URL: ${before}). Do not retry automatically.`};
+    return {status:'needs_review',chat_url:chatUrl(),
+      message:`Submitted via ${method}, but delivery was not verified (previous URL: ${before}). Do not retry automatically.`+effortNote};
   }
   globalThis.chatGPTLauncherRun = run;
 })();

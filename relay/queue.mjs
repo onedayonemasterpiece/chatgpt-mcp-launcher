@@ -5,7 +5,6 @@ import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} fr
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
 const REPORT_STATES = ['sent','opened','blocked','failed','needs_review'];
-const PROGRESS_STATES = ['opening','loading','waiting_composer','draft_ready','submitting','reconciling'];
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -85,6 +84,7 @@ export class FileQueue {
         runtime_loaded_at:safeDate(data.runtime_loaded_at),
         updater_state:UPDATER_STATES.includes(updater.state)?updater.state:'unknown',
         updater_checked_at:safeDate(updater.checked_at),
+        updater_trigger:['manual','scheduled','install'].includes(updater.trigger)?updater.trigger:null,
         updater_error:typeof updater.error_code==='string' &&
           /^[a-z0-9_-]{1,60}$/i.test(updater.error_code) ? updater.error_code : null,
         heartbeat_schema:1,
@@ -122,6 +122,7 @@ export class FileQueue {
       runtime_loaded_at:observation?.runtime_loaded_at || null,
       updater_state:observation?.updater_state || null,
       updater_checked_at:observation?.updater_checked_at || null,
+      updater_trigger:observation?.updater_trigger || null,
       updater_error:observation?.updater_error || null,
       last_job:lastJob ? this.#public(lastJob) : null,
     };
@@ -162,9 +163,9 @@ export class FileQueue {
       const action=args.action;
       if(!['start','continue','open'].includes(action))throw Error('Invalid action');
       const prompt=action==='open'?null:requireString(args.prompt,'prompt',MAX_PROMPT);
-      // No defaulting to the currently selected Pro model: choose Extra High.
-      const effort=action==='open'?'auto':(args.effort??'xhigh');
-      if(!EFFORTS.includes(effort))throw Error('Invalid effort');
+      // Default keeps the level already selected in ChatGPT (it remembers the last one).
+      const effort=action==='open'?null:(args.effort??'auto');
+      if(effort!==null&&!EFFORTS.includes(effort))throw Error('Invalid effort');
       const deviceId=args.device_id||'desktop';
       if(!Object.hasOwn(this.devices,deviceId))throw Error('Unknown device_id');
       const hasUrl=typeof args.chat_url==='string'&&args.chat_url.trim().length>0;
@@ -195,7 +196,7 @@ export class FileQueue {
       const job={
         id:randomUUID(),action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
-        request_id:requestId||null,status:'queued',phase:'queued',created_at:now,progress_at:now
+        request_id:requestId||null,status:'queued',created_at:now
       };
       this.#state.jobs.push(job);
       await this.#save();
@@ -214,16 +215,6 @@ export class FileQueue {
     return {device_id:deviceId,total:chats.length,
       chats:chats.slice().sort((a,b)=>b.last_seen_at.localeCompare(a.last_seen_at)).slice(0,limit)};
   }
-  chatStatus(reference,deviceId='desktop') {
-    const url=this.resolveChat(reference,deviceId);
-    if(!url)throw Error('Unknown or invalid conversation reference');
-    const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===deviceId)||null;
-    const jobs=this.#state.jobs.filter(j=>j.device_id===deviceId &&
-      (j.chat_url===url||j.result_chat_url===url||j.observed_chat_url===url));
-    return {device_id:deviceId,chat_url:url,chat_id:chatIdFromUrl(url),
-      registered:!!chat,conversation:chat,jobs:jobs.slice(-5).map(j=>this.#public(j)),
-      note:'Transport metadata only; model response and task completion are not verified'};
-  }
   #recordChat(chatUrl,deviceId,jobId,transport='observed') {
     const url=canonicalChatUrl(chatUrl);
     if(!url)return null;
@@ -237,43 +228,10 @@ export class FileQueue {
     }
     return next;
   }
-  async progress(deviceId,data) {
-    return this.#run(async()=>{
-      const id=requireString(data.job_id,'job_id',100);
-      if(!PROGRESS_STATES.includes(data.phase))throw Error('Invalid progress phase');
-      const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
-      if(!job||job.status!=='claimed')throw Error('Only claimed jobs can report progress');
-      job.phase=data.phase;
-      job.progress_at=new Date().toISOString();
-      if(data.chat_url!==undefined) {
-        const url=canonicalChatUrl(data.chat_url);
-        if(!url)throw Error('Invalid progress ChatGPT URL');
-        job.observed_chat_url=url;
-        this.#recordChat(url,deviceId,id,'progress');
-      }
-      await this.#save();
-      return this.#public(job);
-    });
-  }
-  async observeChat(deviceId,data) {
-    return this.#run(async()=>{
-      const id=requireString(data.job_id,'job_id',100);
-      const url=canonicalChatUrl(data.chat_url);
-      if(!url)throw Error('Invalid observed ChatGPT URL');
-      const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
-      if(!job||job.status==='queued')throw Error('Job does not belong to this browser');
-      if(job.chat_url&&job.chat_url!==url)throw Error('Unexpected ChatGPT conversation for job');
-      job.observed_chat_url=url;
-      job.observed_at=new Date().toISOString();
-      this.#recordChat(url,deviceId,id,'observed');
-      await this.#save();
-      return {job_id:id,chat_url:url,chat_id:chatIdFromUrl(url),recorded:true};
-    });
-  }
   #public(job) {
     if (!job) return null;
     const {prompt, ...publicJob} = job;
-    return publicJob;
+    return {...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url)};
   }
   status(jobId) {
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
@@ -286,9 +244,7 @@ export class FileQueue {
       const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
       if(!job)return null;
       job.status='claimed';
-      job.phase='opening';
       job.claimed_at=new Date().toISOString();
-      job.progress_at=job.claimed_at;
       await this.#save();
       return {...job,request_id:undefined};
     });
@@ -305,14 +261,12 @@ export class FileQueue {
         if(job.status===data.status)return this.#public(job);
         throw Error('Job is not claimed');
       }
-      const url=data.chat_url||null;
-      if(url!==null&&!canonicalChatUrl(url))throw Error('Invalid result ChatGPT URL');
-      if(job.chat_url&&url&&canonicalChatUrl(job.chat_url)!==canonicalChatUrl(url))
-        throw Error('Reported chat differs from requested conversation');
+      // Rejecting a final report would wedge the browser worker, so an invalid
+      // or unexpected URL is dropped instead of failing the whole report.
+      let url=canonicalChatUrl(data.chat_url);
+      if(job.chat_url&&url&&url!==job.chat_url)url=null;
       job.status=data.status;
-      job.phase=data.status;
-      job.progress_at=new Date().toISOString();
-      job.result_chat_url=url?canonicalChatUrl(url):null;
+      job.result_chat_url=url;
       if(url)this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
       job.reported_at=new Date().toISOString();
