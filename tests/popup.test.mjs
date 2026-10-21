@@ -4,10 +4,11 @@ import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 
 const src=await readFile(new URL('../extension/popup.js',import.meta.url),'utf8');
+const html=await readFile(new URL('../extension/popup.html',import.meta.url),'utf8');
 
 test('popup requests Chrome match-pattern without port, preserves exact fetch origin',async()=>{
  const elements=new Map();
- for(const id of ['url','device','token','enabled','save','poll','status','refresh','activeRevision','installedRevision','manifestVersion','integrity','updateStatus','heartbeatStatus']){
+ for(const id of ['url','device','token','enabled','save','poll','status','refresh','activeRevision','installedRevision','manifestVersion','integrity','updateStatus','heartbeatStatus','updateNow']){
    elements.set(id,{value:'',checked:false,disabled:false,textContent:'',handlers:{},
      addEventListener(event,fn){this.handlers[event]=fn;}});
  }
@@ -44,4 +45,8 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  await popup('save').handlers.click();
  assert.equal(requests[1],'https://relay.example.org/*');
  assert.equal(config.url,'https://relay.example.org:8443/path');
+ assert.match(html,/id="updateNow"[^>]+href="chatgpt-mcp-update:\/\/check"/);
+ assert.equal(typeof popup('updateNow').handlers.click,'function');
+ popup('updateNow').handlers.click();
+ assert.match(popup('status').textContent,/Запускаю обновлятор Windows/);
 });
