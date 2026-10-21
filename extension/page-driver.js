@@ -157,14 +157,33 @@
     return {blocked:'No safe Send button or unique ChatGPT composer form after 120 seconds'};
   }
   const squash = s => (s || '').replace(/\s+/g, ' ').trim();
-  async function addMention(el,name) {
-    // Owner's recipe, like a person: on a new line type "@App", wait for
-    // ChatGPT's app picker, then a space picks the app for this message.
+  function caretToEnd(el) {
     el.focus();
-    document.execCommand('insertParagraph');
-    document.execCommand('insertText',false,'@'+name);
+    const range=document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const selection=window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  async function addMention(el,name) {
+    // Owner's recipe, like a person: a bit later, caret at the end, paste
+    // "@App" as a separate line, wait for ChatGPT's app picker, then a space
+    // with the caret at the end picks the app for this message.
+    await sleep(2000);
+    caretToEnd(el);
+    const data=new DataTransfer();
+    data.setData('text/plain','\n@'+name);
+    const pasted=!el.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+    if (!pasted) { // the editor ignored the paste: type the same line instead
+      document.execCommand('insertParagraph');
+      document.execCommand('insertText',false,'@'+name);
+    }
     await sleep(7000);
-    document.execCommand('insertText',false,' ');
+    if (document.activeElement!==el && !el.contains(document.activeElement)) caretToEnd(el);
+    const key={key:' ',code:'Space',keyCode:32,which:32,bubbles:true,cancelable:true};
+    if (el.dispatchEvent(new KeyboardEvent('keydown',key))) document.execCommand('insertText',false,' ');
+    el.dispatchEvent(new KeyboardEvent('keyup',key));
     await sleep(1000);
   }
   function isConversationUrl(value) {

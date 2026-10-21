@@ -12,7 +12,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0};
+ const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -31,10 +31,13 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    focus:()=>{document.activeElement=editor;},
    dispatchEvent:event=>{
      if(event.type==='keydown'&&event.key==='Enter'){state.enters++;if(enterDelivers)delivered();}
+     if(event.type==='keydown'&&event.key===' ')state.spaces++;
+     if(event.type==='paste'){state.pastes++;editor.innerText+=event.clipboardData.getData('text/plain');return false;}
      return true;
    }};
  const document={
    activeElement:null,
+   createRange:()=>({selectNodeContents(){},collapse(){}}),
    querySelectorAll(selector) {
      if(selector.includes('stop-button')) {
        if(state.answerChecks++<answeringPolls) return [{isConnected:true,getBoundingClientRect:visible}];
@@ -53,7 +56,10 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      if(command==='insertParagraph'){editor.innerText+='\n';return true;}
      assert.equal(command,'insertText');state.insertions++;editor.innerText+=text;return true;}
  };
- const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'})},
+ const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'}),
+     getSelection:()=>({removeAllRanges(){},addRange(){}})},
+   DataTransfer:class DataTransfer {constructor(){this.d={};}setData(t,v){this.d[t]=v;}getData(t){return this.d[t];}},
+   ClipboardEvent:class ClipboardEvent {constructor(type,init){Object.assign(this,init,{type});}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
@@ -194,11 +200,14 @@ test('an Enter that does not deliver is never repeated',async()=>{
  assert.equal(f.state.enters,1);
 });
 
-test('the launcher app is mentioned on a new line, picked with a space, then sent once',async()=>{
+test('the launcher app is pasted on a new line, picked with a space, then sent once',async()=>{
  const f=fixture();
+ let seen='';
  const result=await f.run({action:'start',prompt:'ping',effort:'auto',mention:'Chatgpt task lancher'});
  assert.equal(result.status,'sent',JSON.stringify(result));
- assert.equal(f.state.insertions,3,'prompt, @mention, space');
+ assert.equal(f.state.pastes,1,'pasted like a person, not typed');
+ assert.equal(f.state.spaces,1,'a space picks the app');
+ assert.equal(f.state.insertions,2,'prompt, then the space');
  assert.equal(f.state.clicks,1);
 });
 
