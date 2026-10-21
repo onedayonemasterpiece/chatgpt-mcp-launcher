@@ -15,21 +15,25 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  const popup=id=>elements.get(id);
  const config={};
  const requests=[];
+ let manualUpdater={state:'current',checked_at:'2026-10-21T13:00:00Z',check_id:'a'.repeat(32)};
+ const callbacks=[];
  const chrome={
    storage:{local:{get:async()=>({}),set:async()=>{}}},
    permissions:{request:async(req)=>{requests.push(req.origins[0]);return true;}},
    runtime:{sendMessage:async(msg)=>{
+     if(msg.type==='GET_UPDATE_STATUS') return manualUpdater;
      if(msg.type==='GET_VERSION') return {
        active_revision:'a'.repeat(40),installed_revision:'b'.repeat(40),
        manifest_version:'0.2.0',runtime_integrity:'ok',
-       updater:{state:'current',checked_at:'2026-10-21T13:00:00Z'},
+       updater:manualUpdater,
        last_heartbeat_at:'2026-10-21T13:01:00Z'
      };
      if(msg.config) Object.assign(config,msg.config);
      return {ok:true};
    }},
  };
- runInNewContext(src,{chrome,document:{getElementById:popup},URL,console});
+ runInNewContext(src,{chrome,document:{getElementById:popup},URL,console,
+   setInterval:fn=>{callbacks.push(fn);return callbacks.length;},clearInterval:()=>{}});
  popup('url').value='http://127.0.0.1:8177';
  popup('device').value='desktop';
  popup('token').value='x'.repeat(24);
@@ -48,5 +52,10 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  assert.match(html,/id="updateNow"[^>]+href="chatgpt-mcp-update:\/\/check"/);
  assert.equal(typeof popup('updateNow').handlers.click,'function');
  popup('updateNow').handlers.click();
- assert.match(popup('status').textContent,/Запускаю обновлятор Windows/);
+ assert.match(popup('status').textContent,/Запрашиваю проверку обновлений/);
+ assert.equal(callbacks.length,1);
+ manualUpdater={state:'current',checked_at:'2026-10-21T13:01:00Z',check_id:'b'.repeat(32)};
+ await callbacks[0]();
+ assert.match(popup('status').textContent,/Обновлений нет/);
+ assert.match(popup('updateStatus').textContent,/Обновлений нет/);
 });
