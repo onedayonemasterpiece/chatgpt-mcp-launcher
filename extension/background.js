@@ -64,6 +64,7 @@ async function runningVersion() {
       error_code:typeof updater?.error_code==='string' ? updater.error_code : null,
       check_id:typeof updater?.check_id==='string' && /^[a-f0-9]{32}$/i.test(updater.check_id) ? updater.check_id : null,
       started_at:typeof updater?.started_at==='string' ? updater.started_at : null,
+      trigger:['manual','install','scheduled'].includes(updater?.trigger) ? updater.trigger : 'unknown',
     },
   };
 }
@@ -263,7 +264,8 @@ chrome.runtime.onMessage.addListener((message,_sender,reply)=>{
         check_id:typeof updater?.check_id==='string' ? updater.check_id : null,
         checked_at:typeof updater?.checked_at==='string' ? updater.checked_at : null,
         error_code:typeof updater?.error_code==='string' ? updater.error_code : null,
-        installed_revision:typeof updater?.installed_revision==='string' ? updater.installed_revision : null};
+        installed_revision:typeof updater?.installed_revision==='string' ? updater.installed_revision : null,
+        trigger:['manual','install','scheduled'].includes(updater?.trigger) ? updater.trigger : 'unknown'};
     }
     if(message.type==='GET_VERSION') {
       const version=await runningVersion();
