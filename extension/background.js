@@ -62,6 +62,8 @@ async function runningVersion() {
       state:['current','updated','error','checking'].includes(updater?.state) ? updater.state : 'unknown',
       checked_at:typeof updater?.checked_at==='string' ? updater.checked_at : null,
       error_code:typeof updater?.error_code==='string' ? updater.error_code : null,
+      check_id:typeof updater?.check_id==='string' && /^[a-f0-9]{32}$/i.test(updater.check_id) ? updater.check_id : null,
+      started_at:typeof updater?.started_at==='string' ? updater.started_at : null,
     },
   };
 }
@@ -253,6 +255,15 @@ chrome.runtime.onMessage.addListener((message,_sender,reply)=>{
       const {config}=await api.get('config');
       if(!config) throw new Error('First configure the relay');
       return await sendHeartbeat(config); // Read-only, never claims queued work.
+    }
+    if(message.type==='GET_UPDATE_STATUS') {
+      // A tiny local file only, no GitHub network call or repeated file hashes.
+      const updater=await readLocalJson('updater-status.json');
+      return {state:updater?.state||'unknown',
+        check_id:typeof updater?.check_id==='string' ? updater.check_id : null,
+        checked_at:typeof updater?.checked_at==='string' ? updater.checked_at : null,
+        error_code:typeof updater?.error_code==='string' ? updater.error_code : null,
+        installed_revision:typeof updater?.installed_revision==='string' ? updater.installed_revision : null};
     }
     if(message.type==='GET_VERSION') {
       const version=await runningVersion();
