@@ -10,6 +10,10 @@
 - An already open tab is reused: the same conversation for continue/open/read, an empty "New chat" page for start. If that page holds someone's unsent draft, nothing is typed there and the new chat starts in a fresh tab.
 - The launcher sits in dot's chain of helpers, so it must be able to confirm a result: `chatgpt_read_reply` returns the text of the last ChatGPT reply (text, not screenshots: a screenshot permission would make Chrome disable the extension until the owner re-approves it).
 
+## Result reporting by ChatGPT itself
+
+Owner decision (21 October 2026): results are not read from the screen. Every prompt that Chrome sends ends with a short service note asking the ChatGPT conversation to call the same app's `chatgpt_report(job_id, status)`: `started` as soon as it begins, then `done` with a short `summary` (or `failed` with the reason). `chatgpt_task_status` shows `model_status`, `model_summary` and times. A `started` report proves delivery, so it turns `needs_review` into `sent`. `chatgpt_read_reply` remains only as a fallback.
+
 ## MCP tools
 
 - `chatgpt_start({prompt, effort?, device_id?, request_id?, slack_thread_url?})` — new chat. `chatgpt_task_status` later returns `chat_url` and `chat_id` (slug).

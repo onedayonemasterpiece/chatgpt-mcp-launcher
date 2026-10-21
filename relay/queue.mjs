@@ -25,6 +25,17 @@ export function validChatUrl(value) {
   } catch { return false; }
 }
 
+const MODEL_STATES = ['started','done','failed'];
+// Appended to every prompt Chrome sends: the ChatGPT conversation itself
+// confirms through MCP that it got the prompt and reports its result.
+// This needs no reading of the ChatGPT page.
+export function callbackFooter(jobId) {
+  return '\n\n---\nСлужебное для приложения «Chatgpt task lancher» (задание '+jobId+'): '+
+    'сразу, до начала работы, вызови его инструмент chatgpt_report с job_id="'+jobId+'" и status="started". '+
+    'Когда закончишь, вызови chatgpt_report ещё раз с тем же job_id, status="done" и summary — коротким итогом '+
+    '(если не получилось — status="failed" и причина в summary). Если инструмент недоступен, просто выполни задачу.';
+}
+
 // One plain instruction per state, so a calling agent always knows what to do next.
 function nextStep(job) {
   switch(job.status) {
@@ -34,7 +45,10 @@ function nextStep(job) {
     case 'expired':
       return 'Chrome did not pick this job up within 15 minutes, so nothing was sent. Check chatgpt_device_status, then repeat the call with a new request_id.';
     case 'sent':
-      return 'Delivered (not yet answered). To get the answer, wait about a minute, then call chatgpt_read_reply with chat_ref = chat_id.';
+      if(job.model_status==='done') return 'ChatGPT finished: model_summary holds its own short result.';
+      if(job.model_status==='failed') return 'ChatGPT reported it could not do the task: see model_summary.';
+      if(job.model_status==='started') return 'ChatGPT confirmed it started working. Check chatgpt_task_status again in a few minutes for model_status = done.';
+      return 'Delivered. ChatGPT has been asked to confirm via MCP (model_status started, then done with model_summary). Check chatgpt_task_status again in about a minute.';
     case 'opened':
       return 'The conversation is open in Chrome. Nothing was sent.';
     case 'read':
@@ -267,6 +281,26 @@ export class FileQueue {
     return {job_id:job.id,...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
       next_step:nextStep(job)};
   }
+  // Called by the ChatGPT conversation itself (see callbackFooter).
+  async modelReport(data) {
+    return this.#run(async()=>{
+      const id=requireString(data.job_id,'job_id',100);
+      if(!MODEL_STATES.includes(data.status))throw Error('status must be started, done or failed');
+      const job=this.#state.jobs.find(j=>j.id===id&&(j.action==='start'||j.action==='continue'));
+      if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
+      const now=new Date().toISOString();
+      job.model_status=data.status;
+      if(data.status==='started') job.model_started_at||=now; else job.model_finished_at=now;
+      if(typeof data.summary==='string') job.model_summary=data.summary.slice(0,MAX_REPLY);
+      // The conversation answering is proof the prompt arrived: no more uncertainty.
+      if(['claimed','needs_review','failed'].includes(job.status)) {
+        Object.assign(job,{status:'sent',timed_out:false,reported_at:job.reported_at||now,
+          message:'Delivery confirmed by ChatGPT itself via chatgpt_report'});
+      }
+      await this.#save();
+      return {ok:true,job_id:id,model_status:job.model_status};
+    });
+  }
   status(jobId) {
     if(this.#expire()) void this.#run(()=>this.#save());
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
@@ -302,7 +336,8 @@ export class FileQueue {
       job.status='claimed';
       job.claimed_at=new Date().toISOString();
       await this.#save();
-      return {...job,request_id:undefined};
+      const sends=job.action==='start'||job.action==='continue';
+      return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt};
     });
   }
   async report(deviceId,data) {

@@ -8,7 +8,7 @@ const INSTRUCTIONS = [
   'Drives ChatGPT in the owner\'s own Chrome. Every action is a job: the call returns job_id at once, the browser does the work within seconds to a few minutes.',
   'Workflow:',
   '1. New conversation: chatgpt_start(prompt). Then call chatgpt_task_status(job_id) every ~20 s until status is no longer queued/claimed. On "sent" keep chat_id: it identifies this conversation from now on.',
-  '2. Answer: chatgpt_read_reply(chat_ref = chat_id), then chatgpt_task_status(job_id) -> reply_text. If reply_generating is true, ChatGPT is still writing: read again in ~30 s.',
+  '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id).',
   '3. Follow-up in the same conversation: chatgpt_continue(chat_ref = chat_id, prompt). Never use chatgpt_start for a follow-up.',
   '4. Lost a chat_id: chatgpt_list_chats.',
   'Rules: each result has next_step; follow it. Give every start/continue a unique request_id and reuse the same request_id only to repeat a call whose result you did not get. After needs_review, check with chatgpt_read_reply (last_user_text) before resending. Jobs stuck in queued: check chatgpt_device_status (Chrome offline or commands disabled).',
@@ -35,11 +35,11 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
   },
   {
-    name:'chatgpt_read_reply',description:'Get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
+    name:'chatgpt_read_reply',description:'Fallback when ChatGPT did not report back via model_status: get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
-    name:'chatgpt_task_status', description:'Status of a job by job_id: queued/claimed = in progress; sent = prompt delivered (not answered); read = reply_text ready; opened; blocked = nothing sent; expired = Chrome did not pick it up within 15 min, nothing sent; needs_review = may have been sent, check with chatgpt_read_reply before resending; failed. No job stays in progress longer than 15 minutes. Always includes next_step, plus chat_id when known.',
+    name:'chatgpt_task_status', description:'Status of a job by job_id: queued/claimed = in progress; sent = prompt delivered, then model_status started/done/failed and model_summary as ChatGPT reports back; read = reply_text ready; opened; blocked = nothing sent; expired = Chrome did not pick it up within 15 min, nothing sent; needs_review = may have been sent, check with chatgpt_read_reply before resending; failed. No job stays in progress longer than 15 minutes. Always includes next_step, plus chat_id when known.',
     inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id returned by start/continue/read_reply/open.'}},required:['job_id'],additionalProperties:false},
   },
   {
@@ -49,6 +49,10 @@ const TOOL_LIST = [
   {
     name:'chatgpt_open',description:'Only show a conversation to the owner: bring its tab to the front in Chrome without sending anything. Not needed before chatgpt_continue or chatgpt_read_reply.',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin, then "done" with a short summary (or "failed" with the reason). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','done','failed']},summary:{type:'string',maxLength:20000,description:'Short result (done) or reason (failed).'}},required:['job_id','status'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Diagnostics: whether the owner\'s Chrome is online and accepting commands, and which launcher version it runs. Use when jobs stay queued.',
@@ -127,6 +131,8 @@ export async function makeRelay({file, mcpToken, devices}) {
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
+            } else if (name==='chatgpt_report') {
+              value=await queue.modelReport(args);
             } else if (name==='chatgpt_read_reply') {
               value=await queue.enqueue({...args,action:'read'});
             } else throw new Error('Unknown tool');

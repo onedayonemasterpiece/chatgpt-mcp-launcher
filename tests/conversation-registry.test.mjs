@@ -175,3 +175,27 @@ test('old needs_review jobs never fill the queue up',async t=>{
   await r.initialize();
   assert.equal((await r.enqueue({action:'start',prompt:'fresh'})).status,'queued');
 });
+test('ChatGPT confirms through MCP: started resolves uncertainty, done carries the summary',async t=>{
+  const {q}=await setup(t);
+  const task=await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'});
+  const claimed=await q.claim('desktop');
+  assert.ok(claimed.prompt.includes('job_id="'+task.id+'"'));
+  assert.equal((await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'})).id,task.id,'footer does not break idempotency');
+  await q.report('desktop',{job_id:task.id,status:'needs_review',message:'not verified'});
+  assert.equal(q.status(task.id).status,'needs_review');
+  await q.modelReport({job_id:task.id,status:'started'});
+  let st=q.status(task.id);
+  assert.equal(st.status,'sent','the conversation answering proves delivery');
+  assert.equal(st.model_status,'started');
+  assert.match(st.next_step,/confirmed it started/);
+  await q.modelReport({job_id:task.id,status:'done',summary:'PONG'});
+  st=q.status(task.id);
+  assert.equal(st.model_status,'done');
+  assert.equal(st.model_summary,'PONG');
+  assert.match(st.next_step,/model_summary/);
+  await assert.rejects(q.modelReport({job_id:'nope',status:'done'}),/Unknown job_id/);
+  await assert.rejects(q.modelReport({job_id:task.id,status:'weird'}),/status must be/);
+  const open=await q.enqueue({action:'open',chat_ref:ID});
+  await q.claim('desktop');
+  await assert.rejects(q.modelReport({job_id:open.id,status:'started'}),/Unknown job_id/);
+});
