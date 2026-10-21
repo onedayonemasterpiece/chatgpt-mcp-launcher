@@ -28,7 +28,9 @@ Windows Task Scheduler checks the public GitHub commit SHA **once every 15 minut
 
 ### Manual update from Chrome
 
-Open the extension popup and select **«Проверить и установить обновления»**. The button uses the Windows protocol `chatgpt-mcp-update://check` registered for your current user by `install.ps1 -Install`, and launches the same updater immediately. Chrome may ask you once per launch to confirm opening the Windows app; accept to proceed. The Windows updater checks the public GitHub SHA and downloads code **only when a new commit exists**. It does not need a resident background process, Git, an admin account or dot.
+Open the extension popup and select **«Проверить и установить обновления»**. The button uses the Windows protocol `chatgpt-mcp-update://check` registered for your current user by `install.ps1 -Install`, and launches a **hidden, short-lived Windows Script Host** updater. Chrome may ask to confirm opening the registered Windows app; accept to proceed. A PowerShell window should not appear. The popup reads a tiny local status file while open and reports **checking**, **no updates/current**, **updated**, or **error**. If the popup closes, reopen it to see the latest recorded result. The updater checks the public GitHub SHA and downloads code **only when a new commit exists**. It does not need a resident background process, Git, an admin account or dot.
+
+**After upgrading from the earlier visible-PowerShell handler:** the new updater repairs the protocol registration during its next successful scheduled check (within the normal 15-minute interval). The previously installed handler may display a PowerShell window once during that transition. The new handler executes silently after registration. You can confirm it with the Windows acceptance workflow linked below.
 
 The very first setup must still load the unpacked extension once in `chrome://extensions` from the installation path. If the old extension was loaded from a different directory, disable the old one and select the new public directory. The button cannot install code into a Chrome extension that has never been loaded in Chrome.
 
