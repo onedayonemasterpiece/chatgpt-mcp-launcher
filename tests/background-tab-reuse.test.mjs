@@ -7,10 +7,11 @@ const source=await readFile(new URL('../extension/background.js',import.meta.url
 const CHAT='https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const OTHER='https://chatgpt.com/c/11111111-2222-3333-4444-555555555555';
 
-function fixture(openTabs=[]) {
+function fixture(openTabs=[],opts={}) {
   const calls={created:[],updated:[],windows:[],injections:[]};
   const tabs=new Map(openTabs.map(t=>[t.id,{status:'complete',windowId:1,...t}]));
   let newTabId=100;
+  let reads=0;
   const chrome={
     storage:{local:{get:async()=>({}),set:async()=>{}}},
     alarms:{create:async()=>{},clear:async()=>{},onAlarm:{addListener:()=>{}}},
@@ -19,7 +20,11 @@ function fixture(openTabs=[]) {
     tabs:{
       query:async()=>[...tabs.values()],
       update:async(id,params)=>{calls.updated.push({id,...params});return tabs.get(id);},
-      get:async(id)=>tabs.get(id),
+      get:async(id)=>{
+        const tab=tabs.get(id);
+        if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading'};
+        return {...tab,status:'complete'};
+      },
       create:async(params)=>{
         calls.created.push(params);
         const tab={id:newTabId++,windowId:3,status:'complete',url:params.url};
@@ -35,9 +40,11 @@ function fixture(openTabs=[]) {
       }}];
     }},
   };
-  const sandbox={chrome,URL,Date,Number,AbortController,setTimeout,clearTimeout,fetch:async()=>{throw Error('Unexpected fetch')}};
+  const sandbox={chrome,URL,Date,Number,AbortController,
+    setTimeout:opts.instantTimers ? (cb)=>{Promise.resolve().then(cb);return 1;} : setTimeout,
+    clearTimeout,fetch:async()=>{throw Error('Unexpected fetch')}};
   runInNewContext(source,sandbox,{filename:'background.js',timeout:2000});
-  return {execute:sandbox.execute,calls};
+  return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads};
 }
 
 test('continue reuses matching open ChatGPT conversation and focuses its window',async()=>{
@@ -72,4 +79,10 @@ test('start continues to create a new chat',async()=>{
   await f.execute({action:'start',prompt:'New conversation',effort:'auto'});
   assert.equal(f.calls.created[0].url,'https://chatgpt.com/');
   assert.deepEqual(f.calls.updated,[]);
+});
+
+test('slow ChatGPT tab still loads after a simulated 70-second navigation',async()=>{
+  const f=fixture([{id:50,url:CHAT,status:'loading'}],{slowLoadReads:350,instantTimers:true});
+  await f.awaitTab(50);
+  assert.ok(f.getReads()>350,'must wait past the old 10-second window');
 });
