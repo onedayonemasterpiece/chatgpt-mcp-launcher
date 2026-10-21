@@ -6,13 +6,13 @@ import {runInNewContext} from 'node:vm';
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
-                  transientUrls=[],answeringPolls=0}={}) {
+                  transientUrls=[],answeringPolls=0,enterDelivers=false}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0};
+ const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -28,7 +28,11 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    getBoundingClientRect:visible,getAttribute:()=>null,
    matches:selector=>selector==='[data-testid="composer-text-input"]',
    closest:selector=>selector==='form'&&!noForm?form:null,
-   focus:()=>{document.activeElement=editor;},dispatchEvent:()=>true};
+   focus:()=>{document.activeElement=editor;},
+   dispatchEvent:event=>{
+     if(event.type==='keydown'&&event.key==='Enter'){state.enters++;if(enterDelivers)delivered();}
+     return true;
+   }};
  const document={
    activeElement:null,
    querySelectorAll(selector) {
@@ -51,6 +55,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'})},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
+ sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
  sandbox.globalThis=sandbox;
  runInNewContext(src,sandbox,{timeout:1500,filename:'page-driver.js'});
  return {run:sandbox.chatGPTLauncherRun,state,editor};
@@ -109,14 +114,6 @@ test('native form submission with uncertain result is never repeated',async()=>{
  assert.equal(result.status,'needs_review',JSON.stringify(result));
  assert.equal(f.state.nativeSubmits,1);
  assert.equal(f.editor.innerText,'ping');
-});
-
-test('without a composer form or trusted button no synthetic Enter is dispatched',async()=>{
- const f=fixture({noButton:true,noForm:true});
- const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
- assert.equal(result.status,'blocked',JSON.stringify(result));
- assert.equal(f.state.nativeSubmits+f.state.clicks,0);
- assert.doesNotMatch(src,/new KeyboardEvent\(/);
 });
 
 test('explicit effort picker failure keeps current model, but never repeats send',async()=>{
@@ -205,4 +202,20 @@ test('an answer that never ends blocks the continue without sending anything',as
  assert.equal(result.status,'blocked');
  assert.match(result.message,/nothing was sent/);
  assert.equal(f.state.insertions+f.state.clicks+f.state.nativeSubmits,0);
+});
+
+test('no Send button and no composer form: one Enter into the composer submits',async()=>{
+ const f=fixture({noButton:true,noForm:true,enterDelivers:true});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.match(result.message,/Enter/);
+ assert.equal(f.state.enters,1);
+ assert.equal(f.state.clicks+f.state.nativeSubmits,0);
+});
+
+test('an Enter that does not deliver is never repeated',async()=>{
+ const f=fixture({noButton:true,noForm:true});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'needs_review');
+ assert.equal(f.state.enters,1);
 });
