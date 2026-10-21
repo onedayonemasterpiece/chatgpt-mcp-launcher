@@ -71,7 +71,7 @@ async function runningVersion() {
 // The local Windows sync helper writes this marker only after git fast-forward succeeds.
 // Chrome re-reads the unpacked extension's local resource and reloads itself.
 // No executable code is downloaded or evaluated at runtime.
-async function checkDevReload() {
+async function checkDevReload({fromPoll=false}={}) {
   try {
     const data=await readLocalJson('dev-revision.json');
     if(!data) return {notInstalled:true};
@@ -85,7 +85,7 @@ async function checkDevReload() {
       if(BOOT_BUILD && lastReloadAttempt) await api.set({lastReloadAttempt:null,appliedDevRevision:active});
       return {current:true,active_revision:active};
     }
-    if(pendingReport || polling) return {pending:true};
+    if(pendingReport || (polling && !fromPoll)) return {pending:true};
     // Avoid infinite reload loops if Chrome cannot load the new code.
     if(lastReloadAttempt?.revision===data.revision &&
       Date.now()-Date.parse(lastReloadAttempt.at||'')<300000) {
@@ -274,6 +274,10 @@ async function poll() {
     if(!config?.token || !config?.url) return {unconfigured:true};
     await flushPending(config);
     const version=await sendHeartbeat(config);
+    // Activate newly installed files here, where no job is running. The separate
+    // revision alarm fires together with this one and then always sees a poll in
+    // progress, so on its own it may never get a turn.
+    if(version.update_state!=='current') await checkDevReload({fromPoll:true});
     if(!config.enabled) return {commands_disabled:true,heartbeat_sent:true,version};
     if(version.update_state!=='current') return {
       commands_blocked:true,reason:'Running version is not verified against installed files',
