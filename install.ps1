@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-Public one-time bootstrap and six-hour lightweight updater.
+Public one-time bootstrap and 15-minute lightweight updater.
 No Git, administrator rights, ChatGPT Desktop, dot or SSH forward required.
 Install once with -Install; the same file is copied into LOCALAPPDATA
 and run by Windows Task Scheduler thereafter.
@@ -16,6 +16,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $repo = 'onedayonemasterpiece/chatgpt-mcp-launcher'
 $taskName = 'ChatGPT MCP Launcher Updates'
+$protocolName = 'chatgpt-mcp-update'
 $ext = Join-Path $Root 'source\chatgpt-launcher\extension'
 $marker = Join-Path $ext 'dev-revision.json'
 $statusPath = Join-Path $ext 'updater-status.json'
@@ -67,7 +68,7 @@ function Report-Status([string]$State,[string]$ErrorCode='') {
     installed_revision = $rev
     source_revision = $targetRevision
     error_code = if($ErrorCode) { $ErrorCode } else { $null }
-    interval_hours = 6
+    interval_minutes = 15
   }
   Atomic-Text $statusPath ($record|ConvertTo-Json -Compress -Depth 3)
 }
@@ -86,9 +87,23 @@ function Is-Installed([string]$Revision) {
 function Install-Schedule {
   if(!(Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'updater_script_missing' }
   $taskRun = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$updater+'" -Check'
-  & schtasks.exe /Create /F /SC HOURLY /MO 6 /TN $taskName /TR $taskRun | Out-Null
+  & schtasks.exe /Create /F /SC MINUTE /MO 15 /TN $taskName /TR $taskRun | Out-Null
   if($LASTEXITCODE -ne 0) { throw 'windows_scheduler_registration_failed' }
-  Write-Host 'Scheduled update check installed (every 6 hours).'
+  Write-Host 'Scheduled update check installed (every 15 minutes).'
+}
+function Install-UpdateProtocol {
+  if(!(Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'update_handler_missing' }
+  $base = 'Registry::HKEY_CURRENT_USER\Software\Classes\' + $protocolName
+  New-Item -Path $base -Force | Out-Null
+  Set-Item -Path $base -Value 'URL:ChatGPT MCP Launcher update'
+  New-ItemProperty -Path $base -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+  $cmdKey = $base + '\shell\open\command'
+  New-Item -Path $cmdKey -Force | Out-Null
+  $powershell = Join-Path $PSHOME 'powershell.exe'
+  $launch = '"' + $powershell + '" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $updater + '" -Check'
+  # No untrusted URL argument is accepted. The handler does ONE fixed update check.
+  Set-Item -Path $cmdKey -Value $launch
+  Write-Host 'Chrome update button handler registered for current Windows user.'
 }
 function Latest-Revision {
   $api = 'https://api.github.com/repos/'+$repo+'/commits/main'
@@ -117,7 +132,7 @@ try {
   $lockHeld = $mutex.WaitOne(0)
   if(!$lockHeld) { Write-Host 'Another updater check is already running.'; exit 0 }
 
-  # This is one small HTTPS request, only once every SIX HOURS.
+  # Small authenticated-independent public GitHub SHA check; 15-minute schedule.
   $targetRevision = Latest-Revision
   if(Is-Installed $targetRevision) {
     Report-Status 'current'
@@ -188,9 +203,10 @@ try {
     Report-Status 'updated'
     Write-Host ('Installed GitHub revision: '+$targetRevision)
   }
-  if($Install) { Install-Schedule }
+  if($Install) { Install-Schedule; Install-UpdateProtocol }
   Write-Host ('Chrome unpacked extension: '+$ext)
-  Write-Host 'Once: chrome://extensions -> Developer mode -> Load unpacked -> path above.'
+  Write-Host 'Chrome: chrome://extensions -> Developer mode -> Load unpacked (once) -> path above.'
+  Write-Host 'Then click the new update button in the extension (Windows may ask to confirm the app launch).'
   Write-Host 'Keep only one Launcher extension enabled (disable the old copy if installed elsewhere).'
   Write-Host 'When Chrome reloads, active and installed revisions are reported to MCP.'
 } catch {
