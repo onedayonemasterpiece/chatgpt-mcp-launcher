@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node relay/server.mjs",
-    "test": "node --test tests/relay.test.mjs tests/background-update.test.mjs tests/background-tab-reuse.test.mjs tests/heartbeat.test.mjs tests/popup.test.mjs tests/runtime-revision.test.mjs tests/public-installer.test.mjs"
+    "test": "node --test tests/relay.test.mjs tests/background-update.test.mjs tests/background-tab-reuse.test.mjs tests/heartbeat.test.mjs tests/popup.test.mjs tests/runtime-revision.test.mjs tests/public-installer.test.mjs tests/send-button.test.mjs"
   },
   "engines": {
     "node": ">=20"
