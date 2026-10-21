@@ -4,11 +4,11 @@ import { dirname } from 'node:path';
 import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} from './conversations.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
-const REPORT_STATES = ['sent','opened','read','blocked','failed','needs_review'];
+const REPORT_STATES = ['sent','opened','read','closed','blocked','failed','needs_review'];
 const MAX_REPLY = 20_000;
 // No job may stay "in progress" forever: after this long it gets a final status.
 const STALE_MS = 15 * 60_000;
-const TERMINAL = ['sent','opened','read','blocked','failed','needs_review','expired'];
+const TERMINAL = ['sent','opened','read','closed','blocked','failed','needs_review','expired'];
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -50,6 +50,8 @@ function nextStep(job) {
       if(job.model_status==='failed') return 'ChatGPT reported it could not do the task: see model_summary.';
       if(job.model_status==='started') return 'ChatGPT confirmed it started working. Check chatgpt_task_status again in a few minutes for model_status = done.';
       return 'Delivered. ChatGPT has been asked to confirm via MCP (model_status started, then done with model_summary). Check chatgpt_task_status again in about a minute.';
+    case 'closed':
+      return 'The tab is closed to save memory. The conversation itself stays in ChatGPT: chatgpt_continue with this chat_id reopens it.';
     case 'opened':
       return 'The conversation is open in Chrome. Nothing was sent.';
     case 'read':
@@ -207,8 +209,8 @@ export class FileQueue {
   async enqueue(args) {
     return this.#run(async()=>{
       const action=args.action;
-      if(!['start','continue','open','read'].includes(action))throw Error('Invalid action');
-      const noPrompt=action==='open'||action==='read';
+      if(!['start','continue','open','read','close'].includes(action))throw Error('Invalid action');
+      const noPrompt=action==='open'||action==='read'||action==='close';
       const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
@@ -351,7 +353,8 @@ export class FileQueue {
       if(!job)throw Error('Unknown job');
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
       if(data.status==='read' && job.action!=='read')throw Error('Only read jobs can report read');
-      if(['open','read'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
+      if(data.status==='closed' && job.action!=='close')throw Error('Only close jobs can report closed');
+      if(['open','read','close'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
       if(job.status!=='claimed' && !job.timed_out) {
         if(job.status===data.status) {

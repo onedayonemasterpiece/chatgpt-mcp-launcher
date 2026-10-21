@@ -11,6 +11,7 @@ const INSTRUCTIONS = [
   '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id).',
   '3. Follow-up in the same conversation: chatgpt_continue(chat_ref = chat_id, prompt). Never use chatgpt_start for a follow-up.',
   '4. Lost a chat_id: chatgpt_list_chats.',
+  '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
   'Rules: each result has next_step; follow it. Give every start/continue a unique request_id and reuse the same request_id only to repeat a call whose result you did not get. After needs_review, check with chatgpt_read_reply (last_user_text) before resending. Jobs stuck in queued: check chatgpt_device_status (Chrome offline or commands disabled).',
 ].join('\n');
 const CHAT_REF = {type:'string',description:'Which conversation: the chat_id from chatgpt_task_status or chatgpt_list_chats (preferred), a full https://chatgpt.com/c/... URL, or the job_id that created the chat.'};
@@ -45,6 +46,10 @@ const TOOL_LIST = [
   {
     name:'chatgpt_list_chats',description:'Conversations started or continued through this launcher, newest first, with chat_id and chat_url. Use it to find a chat_id you lost. No message text.',
     inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50,description:'Default 20.'},device_id:COMMON.device_id},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_close_chat',description:'Optional housekeeping: close the Chrome tab of a conversation you no longer need, to save the owner\'s memory (RAM). The conversation stays in ChatGPT; chatgpt_continue reopens it any time. Tabs with an unsent draft or with ChatGPT still answering are left open (status blocked, try later).',
+    inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
     name:'chatgpt_open',description:'Only show a conversation to the owner: bring its tab to the front in Chrome without sending anything. Not needed before chatgpt_continue or chatgpt_read_reply.',
@@ -131,6 +136,8 @@ export async function makeRelay({file, mcpToken, devices}) {
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
+            } else if (name==='chatgpt_close_chat') {
+              value=await queue.enqueue({...args,action:'close'});
             } else if (name==='chatgpt_report') {
               value=await queue.modelReport(args);
             } else if (name==='chatgpt_read_reply') {

@@ -182,22 +182,46 @@ async function openChatTab(job,{fresh=false}={}) {
   }
   return chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
 }
+function driverScript() {
+  return BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
+}
 async function runDriver(script,tab,payload) {
   await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
   const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
-    func:async payload=>payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+    func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
+      payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
       globalThis.chatGPTLauncherRun(payload),args:[payload]});
   return result;
 }
+async function closeChat(job,script) {
+  // Optional housekeeping: never close a tab holding someone's unsent draft
+  // or a reply that ChatGPT is still writing.
+  const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/*'}))
+    .filter(t=>Number.isInteger(t.id) && sameConversationUrl(t.url,job.chat_url));
+  if(!tabs.length) return {status:'closed',chat_url:job.chat_url,message:'No open tab for this conversation'};
+  let closed=0; const kept=[];
+  for(const tab of tabs) {
+    let probe=null;
+    try {probe=(await runDriver(script,tab,{action:'probe'}))?.result;} catch {}
+    if(!probe) kept.push('page not ready');
+    else if(probe.draft) kept.push('unsent draft');
+    else if(probe.answering) kept.push('ChatGPT still answering');
+    else {await chrome.tabs.remove(tab.id);closed++;}
+  }
+  if(!closed) return {status:'blocked',chat_url:job.chat_url,message:'Tab left open: '+kept.join(', ')+'; try again later'};
+  return {status:'closed',chat_url:job.chat_url,
+    message:`Closed ${closed} tab(s)`+(kept.length?`; left open: ${kept.join(', ')}`:'')};
+}
 async function execute(job) {
-  if(!['start','continue','open','read'].includes(job.action))throw Error('Unsupported browser action');
-  const prompt=['open','read'].includes(job.action)?null:preparePrompt(job);
+  if(!['start','continue','open','read','close'].includes(job.action))throw Error('Unsupported browser action');
+  const prompt=['open','read','close'].includes(job.action)?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
+  if(job.action==='close') return closeChat(job,driverScript());
   const tab=await openChatTab(job);
   await awaitTab(tab.id);
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
-  const script=BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
+  const script=driverScript();
   let result=await runDriver(script,tab,{...job,prompt});
   if(job.action==='start' && result?.result?.reason==='draft') {
     // A reused "New chat" tab holds someone's unsent draft; nothing was typed

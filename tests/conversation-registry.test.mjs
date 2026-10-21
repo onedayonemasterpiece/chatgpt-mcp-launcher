@@ -212,3 +212,14 @@ test('the chat address is kept when ChatGPT confirms before Chrome reports back'
   assert.equal(late.model_summary,'PONG');
   assert.equal(q.listChats().chats[0].chat_id,ID);
 });
+
+test('close job has no prompt and can only report closed or blocked',async t=>{
+  const {q}=await setup(t);
+  const task=await q.enqueue({action:'close',chat_ref:ID});
+  assert.equal(task.effort,null);
+  await q.claim('desktop');
+  await assert.rejects(q.report('desktop',{job_id:task.id,status:'sent'}),/never report sent/);
+  const done=await q.report('desktop',{job_id:task.id,status:'closed',chat_url:URL,message:'Closed 1 tab(s)'});
+  assert.equal(done.status,'closed');
+  assert.match(done.next_step,/stays in ChatGPT/);
+});
