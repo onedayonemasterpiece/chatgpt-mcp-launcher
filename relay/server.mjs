@@ -4,42 +4,55 @@ import { resolve } from 'node:path';
 import { FileQueue } from './queue.mjs';
 
 const VERSION = '2025-11-25';
-const EFFORT_SCHEMA = { type:'string',enum:['auto','medium','high','xhigh'],description:'Optional. Default auto keeps the level already selected in ChatGPT. An explicit level is tried once; if it cannot be selected the prompt is still sent.'};
+const INSTRUCTIONS = [
+  'Drives ChatGPT in the owner\'s own Chrome. Every action is a job: the call returns job_id at once, the browser does the work within seconds to a few minutes.',
+  'Workflow:',
+  '1. New conversation: chatgpt_start(prompt). Then call chatgpt_task_status(job_id) every ~20 s until status is no longer queued/claimed. On "sent" keep chat_id: it identifies this conversation from now on.',
+  '2. Answer: chatgpt_read_reply(chat_ref = chat_id), then chatgpt_task_status(job_id) -> reply_text. If reply_generating is true, ChatGPT is still writing: read again in ~30 s.',
+  '3. Follow-up in the same conversation: chatgpt_continue(chat_ref = chat_id, prompt). Never use chatgpt_start for a follow-up.',
+  '4. Lost a chat_id: chatgpt_list_chats.',
+  'Rules: each result has next_step; follow it. Give every start/continue a unique request_id and reuse the same request_id only to repeat a call whose result you did not get. After needs_review, check with chatgpt_read_reply (last_user_text) before resending. Jobs stuck in queued: check chatgpt_device_status (Chrome offline or commands disabled).',
+].join('\n');
+const CHAT_REF = {type:'string',description:'Which conversation: the chat_id from chatgpt_task_status or chatgpt_list_chats (preferred), a full https://chatgpt.com/c/... URL, or the job_id that created the chat.'};
+const CHAT_URL = {type:'string',description:'Alternative to chat_ref: full https://chatgpt.com/c/... URL. Pass chat_ref or chat_url, not both.'};
+const COMMON = {
+  device_id: {type:'string',description:'Leave unset (default desktop).'},
+  request_id: {type:'string',description:'Your unique ID for this action, e.g. a UUID. Repeating a call with the same request_id returns the same job instead of acting twice: use it after a timeout or lost response.'},
+};
 const PROPS = {
-  prompt: {type:'string',minLength:1,maxLength:30000},
-  effort: EFFORT_SCHEMA,
-  device_id: {type:'string',description:'Configured local Chrome (default desktop)'},
-  slack_thread_url: {type:'string',description:'Optional Slack permalink; appended to prompt as a reporting request, not guaranteed.'},
-  request_id: {type:'string',description:'Idempotency key; reuse to prevent duplicate chat submissions.'},
+  prompt: {type:'string',minLength:1,maxLength:30000,description:'Message to send to ChatGPT.'},
+  effort: {type:'string',enum:['auto','medium','high','xhigh'],description:'Leave unset: ChatGPT keeps its current reasoning level. An explicit level is tried once and never blocks sending.'},
+  slack_thread_url: {type:'string',description:'Optional Slack thread permalink; ChatGPT is asked to post its result there (not guaranteed).'},
+  ...COMMON,
 };
 const TOOL_LIST = [
   {
-    name:'chatgpt_start', description:'Queue a new ChatGPT chat in local Chrome. Returns job_id immediately; chatgpt_task_status later gives the new chat_url and chat_id (slug). Does not read model output.',
+    name:'chatgpt_start', description:'Start a NEW ChatGPT conversation and send the prompt. Returns job_id at once; poll chatgpt_task_status until "sent", which gives chat_id for chatgpt_continue and chatgpt_read_reply. For a follow-up in an existing conversation use chatgpt_continue instead.',
     inputSchema:{type:'object', properties:PROPS, required:['prompt'], additionalProperties:false},
   },
   {
-    name:'chatgpt_continue', description:'Send a prompt into an existing ChatGPT conversation by chat_ref (slug, full URL or the job_id that created it) or chat_url. Reuses the open tab or opens it. Returns job_id; never resends after uncertain delivery.',
-    inputSchema:{type:'object',properties:{...PROPS,chat_url:{type:'string',description:'Full exact ChatGPT conversation URL'},chat_ref:{type:'string',description:'Conversation slug, full URL or job ID (instead of chat_url)'}},required:['prompt'],additionalProperties:false},
+    name:'chatgpt_continue', description:'Send a follow-up prompt into an EXISTING conversation (chat_ref = chat_id). Finds the open tab or opens it; no need to call chatgpt_open first. Returns job_id; poll chatgpt_task_status. After needs_review, check with chatgpt_read_reply before resending.',
+    inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
   },
   {
-    name:'chatgpt_open',description:'Bring an existing ChatGPT conversation to the front in local Chrome (reuse its tab or open it) WITHOUT sending anything. Pass exactly one of chat_ref or chat_url. Returns job_id.',
-    inputSchema:{type:'object',properties:{chat_ref:{type:'string',description:'Conversation slug, full URL or job ID'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
+    name:'chatgpt_read_reply',description:'Get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
+    inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
-    name:'chatgpt_read_reply',description:'Read the text of the last ChatGPT reply in an existing conversation (by chat_ref slug/URL/job ID, or chat_url) in local Chrome. Never types or sends. Returns job_id; chatgpt_task_status then gives reply_text and reply_generating (true = ChatGPT is still writing, read again later).',
-    inputSchema:{type:'object',properties:{chat_ref:{type:'string',description:'Conversation slug, full URL or job ID'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
+    name:'chatgpt_task_status', description:'Status of a job by job_id: queued/claimed = in progress; sent = prompt delivered (not answered); read = reply_text ready; opened; blocked = nothing sent; expired = Chrome did not pick it up within 15 min, nothing sent; needs_review = may have been sent, check with chatgpt_read_reply before resending; failed. No job stays in progress longer than 15 minutes. Always includes next_step, plus chat_id when known.',
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id returned by start/continue/read_reply/open.'}},required:['job_id'],additionalProperties:false},
   },
   {
-    name:'chatgpt_list_chats',description:'List ChatGPT conversations (chat_url, chat_id slug, job IDs) started or continued through this launcher, newest first. Survives restarts. No prompt or reply text.',
-    inputSchema:{type:'object',properties:{device_id:{type:'string'},limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false},
+    name:'chatgpt_list_chats',description:'Conversations started or continued through this launcher, newest first, with chat_id and chat_url. Use it to find a chat_id you lost. No message text.',
+    inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50,description:'Default 20.'},device_id:COMMON.device_id},additionalProperties:false},
   },
   {
-    name:'chatgpt_device_status', description:'Inspect local Chrome heartbeat, running and installed Git revisions, updater health, enabled state, and last dispatch. Does not read conversation content.',
-    inputSchema:{type:'object',properties:{device_id:{type:'string'}},additionalProperties:false},
+    name:'chatgpt_open',description:'Only show a conversation to the owner: bring its tab to the front in Chrome without sending anything. Not needed before chatgpt_continue or chatgpt_read_reply.',
+    inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
-    name:'chatgpt_task_status', description:'Check delivery status of a queued browser action (queued/claimed/sent/opened/blocked/failed/needs_review), with chat_url and chat_id (slug) when known. Sent means delivered, not answered.',
-    inputSchema:{type:'object',properties:{job_id:{type:'string'}},required:['job_id'],additionalProperties:false},
+    name:'chatgpt_device_status', description:'Diagnostics: whether the owner\'s Chrome is online and accepting commands, and which launcher version it runs. Use when jobs stay queued.',
+    inputSchema:{type:'object',properties:{device_id:COMMON.device_id},additionalProperties:false},
   },
 ];
 
@@ -97,7 +110,7 @@ export async function makeRelay({file, mcpToken, devices}) {
         if (data.method.startsWith('notifications/')) {res.writeHead(202);return res.end();}
         let out;
         if (data.method==='initialize') {
-          out=rpcOk(data.id,{protocolVersion:VERSION,capabilities:{tools:{listChanged:false}},serverInfo:{name:'chatgpt-local-chrome-launcher',version:'0.2.0'}});
+          out=rpcOk(data.id,{protocolVersion:VERSION,capabilities:{tools:{listChanged:false}},serverInfo:{name:'chatgpt-local-chrome-launcher',version:'0.2.9'},instructions:INSTRUCTIONS});
         } else if (data.method==='ping') out=rpcOk(data.id,{});
         else if (data.method==='tools/list') out=rpcOk(data.id,{tools:TOOL_LIST});
         else if (data.method==='tools/call') {

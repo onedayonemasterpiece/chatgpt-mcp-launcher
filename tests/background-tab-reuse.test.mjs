@@ -8,7 +8,7 @@ const CHAT='https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const OTHER='https://chatgpt.com/c/11111111-2222-3333-4444-555555555555';
 
 function fixture(openTabs=[],opts={}) {
-  const calls={created:[],updated:[],windows:[],injections:[]};
+  const calls={created:[],updated:[],windows:[],injections:[],reloads:[]};
   const tabs=new Map(openTabs.map(t=>[t.id,{status:'complete',windowId:1,...t}]));
   let newTabId=100;
   let reads=0;
@@ -20,6 +20,7 @@ function fixture(openTabs=[],opts={}) {
     tabs:{
       query:async()=>[...tabs.values()],
       update:async(id,params)=>{calls.updated.push({id,...params});return tabs.get(id);},
+      reload:async id=>{calls.reloads.push(id);},
       get:async(id)=>{
         const tab=tabs.get(id);
         if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading',...(opts.loadingUrl!==undefined?{url:opts.loadingUrl}:{})};
@@ -36,6 +37,7 @@ function fixture(openTabs=[],opts={}) {
     scripting:{executeScript:async(params)=>{
       calls.injections.push(params.target.tabId);
       if(params.files) return [];
+      if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,generating:false}}];
       if(opts.driverResults?.length) return [{result:opts.driverResults.shift()}];
       return [{result:{
         status:'sent',chat_url:params.args[0].chat_url??CHAT,message:'fixture send clicked',
@@ -56,7 +58,8 @@ test('continue reuses matching open ChatGPT conversation and focuses its window'
   assert.deepEqual(f.calls.created,[]);
   assert.deepEqual(f.calls.updated,[{id:21,active:true}]);
   assert.deepEqual(f.calls.windows,[{id:1,focused:true}]);
-  assert.deepEqual(f.calls.injections,[21,21]);
+  assert.deepEqual(f.calls.reloads,[21],'a long-open conversation tab is refreshed before sending');
+  assert.deepEqual(f.calls.injections,[21,21,21,21]);
 });
 
 test('continue opens target conversation without navigating an unrelated open chat',async()=>{
@@ -148,4 +151,19 @@ test('read reuses the conversation tab and passes the reply through',async()=>{
   assert.equal(result.reply_text,'PONG');
   assert.equal(result.reply_generating,false);
   assert.deepEqual(f.calls.created,[]);
+});
+
+test('a reused tab with an unsent draft or a reply in progress is not reloaded',async()=>{
+  for(const probe of [{draft:true,generating:false},{draft:false,generating:true}]) {
+    const f=fixture([{id:34,url:CHAT}],{probe});
+    await f.execute({action:'continue',chat_url:CHAT,prompt:'Continue the work',effort:'auto'});
+    assert.deepEqual(f.calls.reloads,[],JSON.stringify(probe));
+  }
+});
+
+test('open-only never reloads or probes the tab',async()=>{
+  const f=fixture([{id:35,url:CHAT}]);
+  await f.execute({action:'open',chat_url:CHAT,id:'open-3'});
+  assert.deepEqual(f.calls.reloads,[]);
+  assert.deepEqual(f.calls.injections,[]);
 });

@@ -33,6 +33,8 @@ test('MCP opens a slug without sending, lists it and continues it by slug',async
   assert.equal(opened.status,'queued');
   assert.equal(opened.chat_url,URL);
   assert.equal(opened.chat_id,ID);
+  assert.equal(opened.job_id,opened.id,'agents are told about job_id, so it must be in the result');
+  assert.match(opened.next_step,/20 seconds/);
   const same=await call('chatgpt_open',{chat_ref:ID,request_id:'open-id'});
   assert.equal(opened.id,same.id,'idempotency prevents duplicate tabs');
   const ready=await json('/device/report',{type:'heartbeat',schema_version:1,
@@ -47,7 +49,9 @@ test('MCP opens a slug without sending, lists it and continues it by slug',async
   assert.equal((await call('chatgpt_task_status',{job_id:opened.id})).status,'claimed');
   const done=await json('/device/report',{job_id:opened.id,status:'opened',chat_url:URL});
   assert.equal(done.code,200);
-  assert.equal((await call('chatgpt_task_status',{job_id:opened.id})).status,'opened');
+  const finished=await call('chatgpt_task_status',{job_id:opened.id});
+  assert.equal(finished.status,'opened');
+  assert.match(finished.next_step,/Nothing was sent/);
   const registry=await call('chatgpt_list_chats',{device_id:'desktop'});
   assert.equal(registry.total,1);
   assert.equal(registry.chats[0].chat_id,ID);

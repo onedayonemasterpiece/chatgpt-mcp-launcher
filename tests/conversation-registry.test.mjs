@@ -124,3 +124,54 @@ test('read job has no prompt, returns the reply text and can never report sent',
   await q.claim('desktop');
   await assert.rejects(q.report('desktop',{job_id:sent.id,status:'read'}),/Only read jobs/);
 });
+async function aged(t,mutate) {
+  const {q,file}=await setup(t);
+  const jobs={
+    queued:await q.enqueue({action:'start',prompt:'old prompt'}),
+  };
+  const state=JSON.parse(await readFile(file,'utf8'));
+  mutate(state);
+  await writeFile(file,JSON.stringify(state));
+  const r=new FileQueue(file,{desktop:token});
+  await r.initialize();
+  return {q:r,file,jobs};
+}
+const OLD=new Date(Date.now()-16*60_000).toISOString();
+test('a job nobody picked up within 15 minutes expires and is never handed out later',async t=>{
+  const {q,jobs}=await aged(t,s=>{s.jobs[0].created_at=OLD;});
+  const st=q.status(jobs.queued.id);
+  assert.equal(st.status,'expired');
+  assert.match(st.next_step,/nothing was sent/);
+  assert.equal(await q.claim('desktop'),null,'an hours-old prompt must not be sent when Chrome returns');
+});
+test('a claimed job without a report gets a final status and a late real report still wins',async t=>{
+  const {q,jobs}=await aged(t,s=>{
+    s.jobs[0].status='claimed';s.jobs[0].claimed_at=OLD;
+    s.jobs.push({...s.jobs[0],id:'read-old',action:'read',prompt:null,status:'claimed',claimed_at:OLD});
+  });
+  const st=q.status(jobs.queued.id);
+  assert.equal(st.status,'needs_review');
+  assert.match(st.next_step,/last_user_text/);
+  assert.equal(q.status('read-old').status,'failed','nothing is sent by a read, so repeating is safe');
+  const late=await q.report('desktop',{job_id:jobs.queued.id,status:'sent',chat_url:URL});
+  assert.equal(late.status,'sent');
+  await assert.rejects(q.report('desktop',{job_id:jobs.queued.id,status:'blocked'}),/not claimed/);
+});
+test('a read reports the last user message so needs_review can be resolved',async t=>{
+  const {q}=await setup(t);
+  const task=await q.enqueue({action:'read',chat_ref:ID});
+  await q.claim('desktop');
+  const done=await q.report('desktop',{job_id:task.id,status:'read',chat_url:URL,
+    reply_text:'PONG2',last_user_text:'PING 2',reply_generating:false});
+  assert.equal(done.last_user_text,'PING 2');
+  assert.match(done.next_step,/last ChatGPT reply/);
+});
+test('old needs_review jobs never fill the queue up',async t=>{
+  const {file}=await setup(t);
+  const state={device_status:{},chats:[]};
+  state.jobs=Array.from({length:500},(_,i)=>({id:'j'+i,action:'start',device_id:'desktop',status:'needs_review',created_at:OLD}));
+  await writeFile(file,JSON.stringify(state));
+  const r=new FileQueue(file,{desktop:token});
+  await r.initialize();
+  assert.equal((await r.enqueue({action:'start',prompt:'fresh'})).status,'queued');
+});
