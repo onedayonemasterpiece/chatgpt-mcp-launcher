@@ -57,9 +57,19 @@
     return {ok:true};
   }
   function composer() {
-    return [...document.querySelectorAll('[contenteditable="true"],textarea')].find(el =>
-      visible(el) && (/спросить chatgpt|ask chatgpt|message chatgpt/i.test(el.getAttribute('aria-label') || '') ||
-        el.id === 'prompt-textarea' || el.matches('[data-testid="composer-text-input"]')));
+    const editors=[...document.querySelectorAll('[contenteditable="true"],textarea')]
+      .filter(visible);
+    // Prefer an exact ChatGPT composer identity over arbitrary editable
+    // controls (sidebar, search, rename dialogs and other page editors).
+    const exact=editors.filter(el =>
+      el.id==='prompt-textarea' || el.matches('[data-testid="composer-text-input"]'));
+    if (exact.length===1) return exact[0];
+    if (exact.length>1) return null; // never guess where to type
+    const named=editors.filter(el =>
+      /спросить chatgpt|ask chatgpt|message chatgpt/i.test(el.getAttribute('aria-label')||''));
+    if (named.length===1) return named[0];
+    const primary=named.filter(el => !!el.closest('main') || !!el.closest('form'));
+    return primary.length===1 ? primary[0] : null;
   }
   function draftText(el) {
     return el.matches('textarea') ? el.value : el.innerText || el.textContent || '';
@@ -77,7 +87,7 @@
       if (!inserted) return false;
       el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
     }
-    return draftText(el).includes(prompt);
+    return draftText(el).trim()===prompt.trim();
   }
   function submitButton() {
     const selectors = [
@@ -89,10 +99,15 @@
       'button[aria-label="Send"]',
       'button[title="Send message"]',
     ];
-    return selectors.map(s=>document.querySelector(s)).find(b=>b && visible(b) && !b.disabled) || null;
+    const matches=selectors.flatMap(s=>[...document.querySelectorAll(s)])
+      .filter(b=>visible(b) && !b.disabled);
+    // Ambiguous Send buttons can belong to unrelated dialogs.
+    const unique=[...new Set(matches)];
+    return unique.length===1 ? unique[0] : null;
   }
   async function waitForComposer() {
-    for (let i=0;i<24;i++) {
+    // Slow ChatGPT hydration can take up to a minute. Wait 90 seconds.
+    for (let i=0;i<180;i++) {
       const el = composer();
       if (el) return el;
       await sleep(500);
@@ -120,7 +135,7 @@
     }
     const before=window.location.href;
     const input=await waitForComposer();
-    if (!input) return {status:'blocked',message:'ChatGPT composer unavailable (login/challenge/loading?)'};
+    if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
     if (draftText(input).trim()) return {status:'blocked',message:'An unsent draft already exists; not overwriting it'};
     const effortResult=await setEffort(job.effort || 'auto');
     if (!effortResult.ok) return {status:'blocked',message:effortResult.message};
