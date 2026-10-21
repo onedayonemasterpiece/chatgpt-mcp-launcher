@@ -16,6 +16,7 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  const config={};
  const requests=[];
  let manualUpdater={state:'current',checked_at:'2026-10-21T13:00:00Z',check_id:'a'.repeat(32),trigger:'scheduled'};
+ let runningRevision='a'.repeat(40), installedRevision='a'.repeat(40);
  const callbacks=[];
  const chrome={
    storage:{local:{get:async()=>({}),set:async()=>{}}},
@@ -23,7 +24,7 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
    runtime:{sendMessage:async(msg)=>{
      if(msg.type==='GET_UPDATE_STATUS') return manualUpdater;
      if(msg.type==='GET_VERSION') return {
-       active_revision:'a'.repeat(40),installed_revision:'b'.repeat(40),
+       active_revision:runningRevision,installed_revision:installedRevision,
        manifest_version:'0.2.0',runtime_integrity:'ok',
        updater:manualUpdater,
        last_heartbeat_at:'2026-10-21T13:01:00Z'
@@ -44,7 +45,7 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  assert.equal(config.enabled,true);
  assert.match(popup('status').textContent,/Настройки сохранены/);
  assert.equal(popup('activeRevision').textContent,'a'.repeat(40));
- assert.equal(popup('installedRevision').textContent,'b'.repeat(40));
+ assert.equal(popup('installedRevision').textContent,'a'.repeat(40));
  popup('url').value='https://relay.example.org:8443/path';
  await popup('save').handlers.click();
  assert.equal(requests[1],'https://relay.example.org/*');
@@ -61,4 +62,8 @@ test('popup requests Chrome match-pattern without port, preserves exact fetch or
  await callbacks[0]();
  assert.match(popup('status').textContent,/Обновлений нет/);
  assert.match(popup('updateStatus').textContent,/Ручная проверка/);
+ installedRevision='b'.repeat(40);
+ await popup('refresh').handlers.click();
+ assert.match(popup('updateStatus').textContent,/Файлы обновлены, но Chrome ещё исполняет предыдущую версию/);
+ assert.match(popup('integrity').textContent,/ожидается активация/);
 });
