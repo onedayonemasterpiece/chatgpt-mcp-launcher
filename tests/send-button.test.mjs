@@ -11,7 +11,7 @@ function fixture({formOnly=false,ambiguous=false}={}) {
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
    click:()=>{state.clicks++;editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';}};
  const other={disabled:false,isConnected:true,getBoundingClientRect:visible,click:()=>state.unrelatedClicks++};
- const form={contains:b=>b===button,querySelectorAll:q=>q==='button[type="submit"]'?[button]:[]};
+ const form={contains:b=>b===button||(ambiguous&&b===other),querySelectorAll:q=>q==='button[type="submit"]'?[button]:[]};
  const editor={id:'prompt-textarea',innerText:'',textContent:'',isConnected:true,
    getBoundingClientRect:visible,getAttribute:()=>null,
    matches:selector=>selector==='[data-testid="composer-text-input"]',
