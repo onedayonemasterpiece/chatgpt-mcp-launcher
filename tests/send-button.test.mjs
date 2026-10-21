@@ -141,3 +141,47 @@ test('a new chat reports the final slug, never a temporary local or intermediate
  assert.equal(result.chat_url,'https://chatgpt.com/c/abcd1234');
  assert.equal(f.state.clicks,1);
 });
+
+function readFixture({replies=[],streaming=false,href='https://chatgpt.com/c/abcd1234'}={}) {
+ const visible=()=>({width:160,height:34});
+ const state={clicks:0,insertions:0};
+ const editor={id:'prompt-textarea',innerText:'',textContent:'',isConnected:true,getBoundingClientRect:visible,
+   getAttribute:()=>null,matches:()=>false,closest:()=>null,focus:()=>{},dispatchEvent:()=>true};
+ const stop={isConnected:true,getBoundingClientRect:visible,click:()=>state.clicks++};
+ const document={
+   querySelectorAll(selector) {
+     if(selector==='[contenteditable="true"],textarea') return [editor];
+     if(selector==='[data-message-author-role="assistant"]') return replies.map(text=>({innerText:text}));
+     if(selector.includes('stop-button')) return streaming?[stop]:[];
+     return [];
+   },
+   execCommand:()=>{state.insertions++;return true;}
+ };
+ const sandbox={window:{location:{href},getComputedStyle:()=>({visibility:'visible',display:'block'})},
+   document,globalThis:null,URL,InputEvent:class InputEvent {},
+   setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
+ sandbox.globalThis=sandbox;
+ runInNewContext(src,sandbox,{timeout:1500,filename:'page-driver.js'});
+ return {read:sandbox.chatGPTLauncherRead,state};
+}
+
+test('read returns the last ChatGPT reply and never types or clicks',async()=>{
+ const f=readFixture({replies:['PONG','  PONG2  ']});
+ const result=await f.read({action:'read'});
+ assert.equal(result.status,'read');
+ assert.equal(result.reply_text,'PONG2');
+ assert.equal(result.reply_generating,false);
+ assert.equal(result.chat_url,'https://chatgpt.com/c/abcd1234');
+ assert.equal(f.state.clicks+f.state.insertions,0);
+});
+
+test('read reports a reply that is still being written, and an empty chat',async()=>{
+ const busy=await readFixture({replies:['PO'],streaming:true}).read({action:'read'});
+ assert.equal(busy.reply_generating,true);
+ assert.match(busy.message,/still writing/);
+ const empty=await readFixture().read({action:'read'});
+ assert.equal(empty.status,'read');
+ assert.equal(empty.reply_text,null);
+ const wrong=await readFixture({href:'https://chatgpt.com/'}).read({action:'read'});
+ assert.equal(wrong.status,'blocked');
+});

@@ -26,6 +26,10 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:{type:'string',description:'Conversation slug, full URL or job ID'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
   },
   {
+    name:'chatgpt_read_reply',description:'Read the text of the last ChatGPT reply in an existing conversation (by chat_ref slug/URL/job ID, or chat_url) in local Chrome. Never types or sends. Returns job_id; chatgpt_task_status then gives reply_text and reply_generating (true = ChatGPT is still writing, read again later).',
+    inputSchema:{type:'object',properties:{chat_ref:{type:'string',description:'Conversation slug, full URL or job ID'},chat_url:{type:'string'},device_id:{type:'string'},request_id:{type:'string'}},additionalProperties:false},
+  },
+  {
     name:'chatgpt_list_chats',description:'List ChatGPT conversations (chat_url, chat_id slug, job IDs) started or continued through this launcher, newest first. Survives restarts. No prompt or reply text.',
     inputSchema:{type:'object',properties:{device_id:{type:'string'},limit:{type:'integer',minimum:1,maximum:50}},additionalProperties:false},
   },
@@ -110,6 +114,8 @@ export async function makeRelay({file, mcpToken, devices}) {
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
+            } else if (name==='chatgpt_read_reply') {
+              value=await queue.enqueue({...args,action:'read'});
             } else throw new Error('Unknown tool');
             out=rpcOk(data.id,resultText(value));
           } catch(err) {out=rpcOk(data.id,resultText({error:err.message},true));}
@@ -135,7 +141,7 @@ export async function makeRelay({file, mcpToken, devices}) {
           return send(res,200,{job:verified ? await queue.claim(deviceId) : null});
         }
         if (url.pathname==='/device/report' && req.method==='POST') {
-          const data = await readJson(req);
+          const data = await readJson(req,256*1024); // room for a reply of up to 20,000 characters
           if(data?.type==='heartbeat') {
             const status=await queue.observeHeartbeat(deviceId,data,req.headers['x-launcher-revision']);
             return send(res,200,{ok:true,reported_revision:status.active_revision,commands_enabled:status.commands_enabled});

@@ -4,7 +4,8 @@ import { dirname } from 'node:path';
 import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} from './conversations.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
-const REPORT_STATES = ['sent','opened','blocked','failed','needs_review'];
+const REPORT_STATES = ['sent','opened','read','blocked','failed','needs_review'];
+const MAX_REPLY = 20_000;
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const SHA40 = /^[a-f0-9]{40}$/;
@@ -161,10 +162,11 @@ export class FileQueue {
   async enqueue(args) {
     return this.#run(async()=>{
       const action=args.action;
-      if(!['start','continue','open'].includes(action))throw Error('Invalid action');
-      const prompt=action==='open'?null:requireString(args.prompt,'prompt',MAX_PROMPT);
+      if(!['start','continue','open','read'].includes(action))throw Error('Invalid action');
+      const noPrompt=action==='open'||action==='read';
+      const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
-      const effort=action==='open'?null:(args.effort??'auto');
+      const effort=noPrompt?null:(args.effort??'auto');
       if(effort!==null&&!EFFORTS.includes(effort))throw Error('Invalid effort');
       const deviceId=args.device_id||'desktop';
       if(!Object.hasOwn(this.devices,deviceId))throw Error('Unknown device_id');
@@ -188,7 +190,7 @@ export class FileQueue {
         }
       }
       if(this.#state.jobs.length>=MAX_JOBS) {
-        const removable=this.#state.jobs.findIndex(j=>['sent','opened','failed','blocked'].includes(j.status));
+        const removable=this.#state.jobs.findIndex(j=>['sent','opened','read','failed','blocked'].includes(j.status));
         if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
         this.#state.jobs.splice(removable,1);
       }
@@ -256,7 +258,8 @@ export class FileQueue {
       const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
       if(!job)throw Error('Unknown job');
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
-      if(job.action==='open'&&data.status==='sent')throw Error('Open-only jobs can never report sent');
+      if(data.status==='read' && job.action!=='read')throw Error('Only read jobs can report read');
+      if(['open','read'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       if(job.status!=='claimed') {
         if(job.status===data.status)return this.#public(job);
         throw Error('Job is not claimed');
@@ -269,6 +272,10 @@ export class FileQueue {
       job.result_chat_url=url;
       if(url)this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
+      if(job.action==='read') {
+        job.reply_text=typeof data.reply_text==='string'?data.reply_text.slice(0,MAX_REPLY):null;
+        job.reply_generating=data.reply_generating===true;
+      }
       job.reported_at=new Date().toISOString();
       await this.#save();
       return this.#public(job);

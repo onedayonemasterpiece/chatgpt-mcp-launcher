@@ -187,7 +187,7 @@
     const before=window.location.href;
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
-    if (draftText(input).trim()) return {status:'blocked',message:'An unsent draft already exists; not overwriting it'};
+    if (draftText(input).trim()) return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
     // A launch matters more than the effort level: ChatGPT keeps the last
     // selected level, so a picker that cannot be verified never blocks the send.
     const effortResult=await setEffort(job.effort || 'auto');
@@ -234,5 +234,28 @@
     return {status:'needs_review',chat_url:chatUrl(),
       message:`Submitted via ${method}, but delivery was not verified (previous URL: ${before}). Do not retry automatically.`+effortNote};
   }
+  function lastReply() {
+    const replies=[...document.querySelectorAll('[data-message-author-role="assistant"]')];
+    const text=(replies.at(-1)?.innerText || replies.at(-1)?.textContent || '').trim();
+    return text || null;
+  }
+  function replyInProgress() {
+    return [...document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop streaming"],'+
+      'button[aria-label="Остановить потоковую передачу"],button[aria-label="Остановить"]')].some(visible);
+  }
+  async function read(job) {
+    // Reads only the last ChatGPT reply of this conversation; never types or clicks.
+    if (!job || job.action!=='read') return {status:'failed',message:'Invalid job'};
+    if (!isConversationUrl(window.location.href)) return {status:'blocked',message:'Not on a ChatGPT conversation URL'};
+    await waitForComposer(); // the composer appearing means the conversation has rendered
+    for (let i=0;i<20 && !lastReply();i++) await sleep(500);
+    await sleep(1000);
+    const text=lastReply();
+    const busy=replyInProgress();
+    return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,
+      message:!text ? 'No ChatGPT reply in this conversation yet' :
+        busy ? 'ChatGPT is still writing this reply; read again later' : 'Last ChatGPT reply read'};
+  }
   globalThis.chatGPTLauncherRun = run;
+  globalThis.chatGPTLauncherRead = read;
 })();

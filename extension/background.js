@@ -161,12 +161,19 @@ function sameConversationUrl(a,b) {
       actual.pathname.replace(/\/+$/,'')===expected.pathname.replace(/\/+$/,'');
   } catch {return false;}
 }
-async function openChatTab(job) {
-  // Reuse the *same conversation* in the user's logged-in Chrome; never
-  // navigate an unrelated ChatGPT tab or overwrite its unsent draft.
-  if(job.action==='continue'||job.action==='open') {
+function isNewChatTab(url) {
+  try {const u=new URL(url);return u.origin==='https://chatgpt.com' && u.pathname==='/' && !u.search && !u.hash;}
+  catch {return false;}
+}
+async function openChatTab(job,{fresh=false}={}) {
+  // Reuse the tab that is already open: the same conversation, or for a new
+  // chat an empty "New chat" page. Never navigate an unrelated ChatGPT tab;
+  // the page driver refuses to overwrite an unsent draft.
+  if(!fresh) {
     const candidates=await chrome.tabs.query({url:'https://chatgpt.com/*'});
-    const match=candidates.find(t=>Number.isInteger(t.id) && sameConversationUrl(t.url,job.chat_url));
+    const match=job.action==='start' ?
+      candidates.filter(t=>Number.isInteger(t.id) && isNewChatTab(t.url) && t.status==='complete').at(-1) :
+      candidates.find(t=>Number.isInteger(t.id) && sameConversationUrl(t.url,job.chat_url));
     if(match) {
       await chrome.tabs.update(match.id,{active:true});
       if(Number.isInteger(match.windowId)) await chrome.windows.update(match.windowId,{focused:true});
@@ -175,27 +182,44 @@ async function openChatTab(job) {
   }
   return chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
 }
+async function runDriver(script,tab,payload) {
+  await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
+  const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
+    func:async payload=>payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+      globalThis.chatGPTLauncherRun(payload),args:[payload]});
+  return result;
+}
 async function execute(job) {
-  if(!['start','continue','open'].includes(job.action))throw Error('Unsupported browser action');
-  const prompt=job.action==='open'?null:preparePrompt(job);
+  if(!['start','continue','open','read'].includes(job.action))throw Error('Unsupported browser action');
+  const prompt=['open','read'].includes(job.action)?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
   const tab=await openChatTab(job);
   await awaitTab(tab.id);
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
   const script=BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
-  await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
-  const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
-    func:async payload=>globalThis.chatGPTLauncherRun(payload),args:[{...job,prompt}]});
+  let result=await runDriver(script,tab,{...job,prompt});
+  if(job.action==='start' && result?.result?.reason==='draft') {
+    // A reused "New chat" tab holds someone's unsent draft; nothing was typed
+    // there, so start once more in a fresh tab instead of blocking.
+    const fresh=await openChatTab(job,{fresh:true});
+    await awaitTab(fresh.id);
+    result=await runDriver(script,fresh,{...job,prompt});
+  }
   if(!result?.result||typeof result.result.status!=='string')throw Error('Missing browser action result');
-  return {status:result.result.status,chat_url:result.result.chat_url||null,
+  const out={status:result.result.status,chat_url:result.result.chat_url||null,
     message:result.result.message||''};
+  if(job.action==='read') {
+    out.reply_text=typeof result.result.reply_text==='string' ? result.result.reply_text.slice(0,20000) : null;
+    out.reply_generating=result.result.reply_generating===true;
+  }
+  return out;
 }
 async function flushPending(config) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
-  const {job_id,status,chat_url,message}=pendingReport;
-  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message});}
+  const {job_id,status,chat_url,message,reply_text,reply_generating}=pendingReport;
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating});}
   catch(err) {
     // A report the relay refuses outright would be resent forever and block
     // heartbeats and every later job. Network errors and 401 stay pending.
