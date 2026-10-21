@@ -30,12 +30,26 @@ jobs:
           $reg = 'Registry::HKEY_CURRENT_USER\Software\Classes\chatgpt-mcp-update\shell\open\command'
           if (!(Test-Path $reg)) { throw 'Windows custom protocol handler missing' }
           $registered = (Get-Item $reg).GetValue('')
-          if (!$registered.Contains('updater.ps1') -or !$registered.Contains('-Check')) { throw 'Incorrect update handler command' }
+          if (!$registered.Contains('wscript.exe') -or !$registered.Contains('launch-update.vbs') -or $registered.Contains('powershell.exe')) { throw 'Visible or incorrect update handler' }
+          $helper = Join-Path $root 'launch-update.vbs'
+          if (!(Test-Path $helper)) { throw 'Silent launcher script missing' }
+          $helperContents = Get-Content -Raw -LiteralPath $helper
+          if (!$helperContents.Contains('sh.Run') -or !$helperContents.Contains('0, False')) { throw 'Helper did not request a hidden child process' }
           schtasks.exe /Query /TN 'ChatGPT MCP Launcher Updates' /FO LIST
           if ($LASTEXITCODE -ne 0) { throw 'Scheduled updater missing' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'updater.ps1') -Check -Root $root
           if ($LASTEXITCODE -ne 0) { throw 'On-demand update check failed' }
           $state = Get-Content -Raw (Join-Path $installed 'updater-status.json') | ConvertFrom-Json
-          if ($state.state -ne 'current' -or $state.interval_minutes -ne 15) { throw 'Unexpected updater status or cadence' }
+          if ($state.state -ne 'current' -or $state.interval_minutes -ne 15 -or !$state.check_id) { throw 'Unexpected updater status, missing check id or cadence' }
+          $previousCheckId = $state.check_id
+          & "$env:WINDIR\System32\cscript.exe" //B //NoLogo $helper
+          if ($LASTEXITCODE -ne 0) { throw 'Silent script handler execution failed' }
+          $newState = $null
+          for ($n=0; $n -lt 35; $n++) {
+            Start-Sleep -Seconds 1
+            $newState = Get-Content -Raw (Join-Path $installed 'updater-status.json') | ConvertFrom-Json
+            if ($newState.check_id -ne $previousCheckId -and $newState.state -eq 'current') { break }
+          }
+          if ($newState.check_id -eq $previousCheckId -or $newState.state -ne 'current') { throw 'No completion receipt from silent handler' }
           Write-Host ('PASS Windows install: '+$marker.revision)
-          Write-Host 'PASS: per-user protocol, 15-minute schedule, SHA verification, manual check'
+          Write-Host 'PASS: silent per-user protocol, 15-minute schedule, SHA verification, manual UI-equivalent check with completion receipt'
