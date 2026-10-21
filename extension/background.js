@@ -125,12 +125,14 @@ async function relayFetch(config,method,path,body) {
   } finally {clearTimeout(timeout);}
 }
 async function awaitTab(tabId) {
-  for(let i=0;i<50;i++) {
+  // Some ChatGPT pages need up to a minute to finish navigation.
+  // Budget 90 seconds here; the page driver independently waits for the composer.
+  for(let i=0;i<450;i++) {
     const tab=await chrome.tabs.get(tabId);
     if(tab.status==='complete') return;
     await new Promise(r=>setTimeout(r,200));
   }
-  throw new Error('ChatGPT tab load timeout');
+  throw new Error('ChatGPT tab load timeout after 90 seconds');
 }
 function validChatUrl(url) {
   try {const u=new URL(url);return u.origin==='https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname) && !u.search && !u.hash;}
