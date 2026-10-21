@@ -1,0 +1,41 @@
+name: Windows installer acceptance
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-bootstrap:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Node regression tests
+        shell: pwsh
+        run: npm test
+      - name: Install and verify no-admin updater
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'McpLauncherAcceptance'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Install -Root $root
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer failed' }
+          $installed = Join-Path $root 'source\chatgpt-launcher\extension'
+          $marker = Get-Content -Raw (Join-Path $installed 'dev-revision.json') | ConvertFrom-Json
+          if ($marker.revision -ne $env:GITHUB_SHA) { throw 'Installed commit does not equal tested HEAD' }
+          if (!(Test-Path (Join-Path $installed 'popup.html'))) { throw 'Popup missing' }
+          $popup = Get-Content -Raw (Join-Path $installed 'popup.html')
+          if (!$popup.Contains('chatgpt-mcp-update://check')) { throw 'Update button was not installed' }
+          $reg = 'Registry::HKEY_CURRENT_USER\Software\Classes\chatgpt-mcp-update\shell\open\command'
+          if (!(Test-Path $reg)) { throw 'Windows custom protocol handler missing' }
+          $registered = (Get-Item $reg).GetValue('')
+          if (!$registered.Contains('updater.ps1') -or !$registered.Contains('-Check')) { throw 'Incorrect update handler command' }
+          schtasks.exe /Query /TN 'ChatGPT MCP Launcher Updates' /FO LIST
+          if ($LASTEXITCODE -ne 0) { throw 'Scheduled updater missing' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'updater.ps1') -Check -Root $root
+          if ($LASTEXITCODE -ne 0) { throw 'On-demand update check failed' }
+          $state = Get-Content -Raw (Join-Path $installed 'updater-status.json') | ConvertFrom-Json
+          if ($state.state -ne 'current' -or $state.interval_minutes -ne 15) { throw 'Unexpected updater status or cadence' }
+          Write-Host ('PASS Windows install: '+$marker.revision)
+          Write-Host 'PASS: per-user protocol, 15-minute schedule, SHA verification, manual check'
