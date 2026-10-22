@@ -2,8 +2,14 @@ import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { FileQueue } from './queue.mjs';
+import { DeliveryError, sealer, webhookSender } from './events.mjs';
 
 const VERSION = '2025-11-25';
+// MCP 2026-07-28 (needed for OpenAI MCP Events) is served next to the
+// 2025-11-25 handshake; a client picks one with server/discover.
+const MODERN = '2026-07-28';
+const META_VERSION = 'io.modelcontextprotocol/protocolVersion';
+const SERVER_INFO = {name:'chatgpt-local-chrome-launcher',version:'0.3.0'};
 const INSTRUCTIONS = [
   'Drives ChatGPT in the owner\'s own Chrome. Every action is a job: the call returns job_id at once, the browser does the work within seconds to a few minutes.',
   'Workflow:',
@@ -12,6 +18,8 @@ const INSTRUCTIONS = [
   '3. Follow-up in the same conversation: chatgpt_continue(chat_ref = chat_id, prompt). Never use chatgpt_start for a follow-up.',
   '4. Lost a chat_id: chatgpt_list_chats.',
   '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
+  'Events: subscribe to chatgpt_launcher.job_update to be woken when a job finishes, is blocked/failed/needs review/expired, its tab is closed, or the agent goes silent. execution separates the work from delivery: awaiting_confirmation, started, progress, done, failed, unconfirmed (no report for too long: unknown, not done).',
+  'Coordination (optional reminder): chatgpt_coordination_set(goal, min_agents, idle_minutes) and subscribe to chatgpt_launcher.coordination_reminder; you are reminded while fewer agents than min_agents report started/progress for longer than idle_minutes. Pause only with a reason and a duration; close it explicitly when the whole work is done or cancelled.',
   'Rules: each result has next_step; follow it. Give every start/continue a unique request_id and reuse the same request_id only to repeat a call whose result you did not get. After needs_review, check with chatgpt_read_reply (last_user_text) before resending. Jobs stuck in queued: check chatgpt_device_status (Chrome offline or commands disabled).',
 ].join('\n');
 const CHAT_REF = {type:'string',description:'Which conversation: the chat_id from chatgpt_task_status or chatgpt_list_chats (preferred), a full https://chatgpt.com/c/... URL, or the job_id that created the chat.'};
@@ -56,8 +64,18 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
-    name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin, then "done" with a short summary (or "failed" with the reason). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
-    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','done','failed']},summary:{type:'string',maxLength:20000,description:'Short result (done) or reason (failed).'}},required:['job_id','status'],additionalProperties:false},
+    name:'chatgpt_coordination_set',description:'Optional reminder for a coordinator: open or update the coordination of a complex piece of work. While it is open and fewer than min_agents agents report started/progress for longer than idle_minutes, a chatgpt_launcher.coordination_reminder event is sent. It never starts agents. Pause with pause_minutes + pause_reason (0 ends the pause). Returns the current state.',
+    inputSchema:{type:'object',properties:{goal:{type:'string',maxLength:500,description:'What is being coordinated (required when opening).'},
+      min_agents:{type:'integer',minimum:1,maximum:20,description:'Default 2.'},idle_minutes:{type:'number',minimum:1,maximum:240,description:'Default 15.'},
+      pause_minutes:{type:'number',minimum:0,maximum:1440},pause_reason:{type:'string',maxLength:300}},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_coordination_close',description:'Close the coordination when the whole work is done or cancelled; reminders stop. Finishing one of your own replies does not close it.',
+    inputSchema:{type:'object',properties:{reason:{type:'string',maxLength:300}},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin; during long work you may send "progress" with a short note; at the end "done" with a short summary (or "failed" with the reason). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','progress','done','failed']},summary:{type:'string',maxLength:20000,description:'Short progress note, result (done) or reason (failed).'}},required:['job_id','status'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Diagnostics: whether the owner\'s Chrome is online and accepting commands, and which launcher version it runs. Use when jobs stay queued.',
@@ -88,7 +106,12 @@ async function readJson(req, maxBytes = 64 * 1024) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 function rpcOk(id, result) {return {jsonrpc:'2.0', id, result};}
-function rpcError(id, code, message) {return {jsonrpc:'2.0', id, error:{code,message}};}
+function rpcError(id, code, message, data) {return {jsonrpc:'2.0', id, error:{code,message,...(data?{data}:{})}};}
+// The extra fields a 2026-07-28 result carries (cacheable lists add cacheScope/ttlMs).
+function modern(result, cacheable=false) {
+  return {...result,resultType:'complete',...(cacheable?{cacheScope:'private',ttlMs:0}:{}),
+    _meta:{'io.modelcontextprotocol/serverInfo':SERVER_INFO}};
+}
 function resultText(data, isError = false) {
   return {content:[{type:'text',text:JSON.stringify(data)}], ...(isError ? {isError:true} : {})};
 }
@@ -97,13 +120,25 @@ function targetOrigin(req) {
   // Reject browser-originated MCP mutations; Chrome device API uses bearer + host permissions.
   return !origin;
 }
-export async function makeRelay({file, mcpToken, devices}) {
+export async function makeRelay({file, mcpToken, devices, sender=webhookSender(), queueOptions={}, deliveryMs=1000, tickMs=60_000}) {
   if (typeof mcpToken !== 'string' || mcpToken.length < 24) throw new Error('MCP token must have >= 24 characters');
   if (!devices || Object.keys(devices).length===0 || Object.values(devices).some(t => typeof t !== 'string' || t.length < 24)) {
     throw new Error('Configure device token(s) (>= 24 characters)');
   }
-  const queue = new FileQueue(file, devices);
+  const queue = new FileQueue(file, devices, {seal:sealer(mcpToken),...queueOptions});
   await queue.initialize();
+  // Background work: deliver due events, and check silence/coordination.
+  let delivering=false;
+  const timers=[
+    setInterval(async()=>{
+      if(delivering) return;
+      delivering=true;
+      try {while(await queue.deliverDue(sender));} catch(err) {console.error('event delivery',err?.message);}
+      finally {delivering=false;}
+    },deliveryMs),
+    setInterval(()=>queue.tick().catch(err=>console.error('tick',err?.message)),tickMs),
+  ];
+  for(const t of timers) t.unref?.();
   const server = http.createServer(async (req,res) => {
     try {
       const url = new URL(req.url || '/', 'http://localhost');
@@ -118,10 +153,29 @@ export async function makeRelay({file, mcpToken, devices}) {
         if (data.jsonrpc !== '2.0' || typeof data.method !== 'string') return send(res,400,rpcError(data.id??null,-32600,'Invalid JSON-RPC'));
         if (data.method.startsWith('notifications/')) {res.writeHead(202);return res.end();}
         let out;
+        const requested=data.params?._meta?.[META_VERSION];
+        const isModern=requested!==undefined;
+        if (isModern && requested!==MODERN) {
+          return send(res,200,rpcError(data.id,-32022,'Unsupported protocol version',{supported:[MODERN],requested}));
+        }
+        const wrap=(result,cacheable)=>isModern?modern(result,cacheable):result;
         if (data.method==='initialize') {
-          out=rpcOk(data.id,{protocolVersion:VERSION,capabilities:{tools:{listChanged:false}},serverInfo:{name:'chatgpt-local-chrome-launcher',version:'0.2.9'},instructions:INSTRUCTIONS});
+          out=rpcOk(data.id,{protocolVersion:VERSION,capabilities:{tools:{listChanged:false}},serverInfo:SERVER_INFO,instructions:INSTRUCTIONS});
+        } else if (data.method==='server/discover') {
+          out=rpcOk(data.id,modern({supportedVersions:[MODERN],capabilities:{tools:{listChanged:false},events:{}},instructions:INSTRUCTIONS},true));
         } else if (data.method==='ping') out=rpcOk(data.id,{});
-        else if (data.method==='tools/list') out=rpcOk(data.id,{tools:TOOL_LIST});
+        else if (data.method==='tools/list') out=rpcOk(data.id,wrap({tools:TOOL_LIST},true));
+        else if (data.method==='events/list') out=rpcOk(data.id,wrap(queue.listEvents(),true));
+        else if (data.method==='events/subscribe'||data.method==='events/unsubscribe') {
+          try {
+            const result=data.method==='events/subscribe' ? await queue.subscribe(data.params,sender) : await queue.unsubscribe(data.params);
+            out=rpcOk(data.id,wrap(result));
+          } catch(err) {
+            const reason=err instanceof DeliveryError ? err.reason : 'invalid_params';
+            const invalid=['invalid_secret','invalid_url','unknown_event','unexpected_arguments','invalid_ttl','invalid_params'].includes(reason);
+            out=rpcError(data.id,invalid?-32602:-32015,invalid?'Invalid subscription':'Callback verification failed',{reason});
+          }
+        }
         else if (data.method==='tools/call') {
           const {name, arguments:args={}} = data.params || {};
           try {
@@ -142,9 +196,13 @@ export async function makeRelay({file, mcpToken, devices}) {
               value=await queue.modelReport(args);
             } else if (name==='chatgpt_read_reply') {
               value=await queue.enqueue({...args,action:'read'});
+            } else if (name==='chatgpt_coordination_set') {
+              value=await queue.coordinationSet(args);
+            } else if (name==='chatgpt_coordination_close') {
+              value=await queue.coordinationClose(args.reason);
             } else throw new Error('Unknown tool');
-            out=rpcOk(data.id,resultText(value));
-          } catch(err) {out=rpcOk(data.id,resultText({error:err.message},true));}
+            out=rpcOk(data.id,wrap(resultText(value)));
+          } catch(err) {out=rpcOk(data.id,wrap(resultText({error:err.message},true)));}
         } else out=rpcError(data.id,-32601,'Unknown method');
         return send(res,200,out);
       }
@@ -179,6 +237,7 @@ export async function makeRelay({file, mcpToken, devices}) {
       return send(res,404,{error:'Not found'});
     } catch (err) {return send(res,400,{error:err.message || 'Bad request'});}
   });
+  server.on('close',()=>timers.forEach(clearInterval));
   return {server,queue};
 }
 
