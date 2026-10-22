@@ -104,6 +104,7 @@ test('start continues to create a new chat',async()=>{
   await f.execute({action:'start',prompt:'New conversation',effort:'auto'});
   assert.equal(f.calls.created[0].url,'https://chatgpt.com/');
   assert.deepEqual(f.calls.updated,[]);
+  assert.deepEqual(f.calls.windows,[{id:3,focused:true}]);
 });
 
 test('slow ChatGPT tab still loads after a simulated 70-second navigation',async()=>{

@@ -6,7 +6,8 @@ import {runInNewContext} from 'node:vm';
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
-                  transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false}={}) {
+                  transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false,
+                  commandResult=true,refuseInput=false,delayedInput=false}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
@@ -42,6 +43,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      return true;
    }};
  const document={
+   hasFocus:()=>true,
    activeElement:null,
    createRange:()=>({selectNodeContents(){},collapse(){}}),
    querySelectorAll(selector) {
@@ -61,7 +63,12 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    execCommand:(command,_show,text)=>{
      if(command==='insertParagraph'){editor.innerText+='\n';return true;}
      if(command==='delete'){state.deletes=(state.deletes||0)+1;editor.innerText='';return true;}
-     assert.equal(command,'insertText');state.insertions++;editor.innerText+=reformat(text);return true;}
+     assert.equal(command,'insertText');state.insertions++;
+     if(!refuseInput) {
+       const apply=()=>{editor.innerText+=reformat(text);};
+       if(delayedInput) Promise.resolve().then(apply); else apply();
+     }
+     return commandResult;}
  };
  const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'}),
      getSelection:()=>({removeAllRanges(){},addRange(){}})},
@@ -83,6 +90,41 @@ test('ping submits using a unique composer Send button exactly once',async()=>{
  assert.equal(f.state.nativeSubmits,0);
  assert.equal(f.state.insertions,1);
  assert.equal(f.state.unrelatedClicks,0);
+});
+
+test('verified text succeeds even if execCommand returns false',async()=>{
+ const f=fixture({commandResult:false});
+ const result=await f.run({action:'start',prompt:'verified input'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.insertions,1);assert.equal(f.state.clicks,1);
+});
+
+test('asynchronous editor reconciliation is read before verifying insertion',async()=>{
+ const f=fixture({delayedInput:true});
+ const result=await f.run({action:'start',prompt:'delayed input'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.insertions,1);
+});
+
+test('refused insertion reports structural diagnostics without prompt text or retry',async()=>{
+ const f=fixture({commandResult:false,refuseInput:true});
+ const result=await f.run({action:'start',prompt:'private prompt content'});
+ assert.equal(result.status,'blocked');
+ assert.match(result.message,/editing command refused/);
+ assert.match(result.message,/"document_focused":true/);
+ assert.match(result.message,/"actual_chars":0/);
+ assert.ok(!result.message.includes('private prompt content'));
+ assert.equal(f.state.insertions,1);assert.equal(f.state.clicks,0);
+});
+
+test('a successful command with different text never submits or inserts again',async()=>{
+ const f=fixture({reformat:()=> 'unrelated private text'});
+ const result=await f.run({action:'start',prompt:'expected private text'});
+ assert.equal(result.status,'blocked');
+ assert.match(result.message,/text did not settle/);
+ assert.ok(!result.message.includes('private text'));
+ assert.equal(f.state.insertions,1);assert.equal(f.state.clicks,0);
+ assert.equal(f.editor.innerText,'unrelated private text');
 });
 
 test('unlabelled form submit button works when tied to identified composer',async()=>{

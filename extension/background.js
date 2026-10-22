@@ -180,7 +180,10 @@ async function openChatTab(job,{fresh=false}={}) {
       return {...match,reused:true};
     }
   }
-  return chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
+  const tab=await chrome.tabs.create({url:job.action==='start'?'https://chatgpt.com/':job.chat_url,active:true});
+  // An active tab can still belong to an unfocused Chrome window.
+  if(Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId,{focused:true});
+  return tab;
 }
 function driverScript() {
   return BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
