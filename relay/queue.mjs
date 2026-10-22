@@ -82,6 +82,16 @@ function nextStep(job) {
   }
 }
 
+// Only known keys with plain values: what the window looked like, never page text.
+function pageState(raw) {
+  if(!raw||typeof raw!=='object') return undefined;
+  const pick=(v,allowed)=>allowed.includes(v)?v:'unknown';
+  const count=v=>Number.isInteger(v)&&v>=0&&v<100000?v:null;
+  return {url_kind:pick(raw.url_kind,['conversation','other']),composer:pick(raw.composer,['present','missing','ambiguous']),
+    composer_text:pick(raw.composer_text,['empty','our_prompt','other_draft']),answering:raw.answering===true,
+    connection_lost:raw.connection_lost===true,user_messages:count(raw.user_messages),assistant_messages:count(raw.assistant_messages)};
+}
+
 function requireString(value, name, maxLen = 256) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > maxLen) {
     throw new Error(`${name} must be a nonempty string <= ${maxLen} chars`);
@@ -346,6 +356,7 @@ export class FileQueue {
     const summary=(MODEL_FINAL.includes(job.model_status) ? job.model_summary : job.message) || '';
     this.#emit(JOB_EVENT,[job.id,job.status,job.model_status||'',reason].join('|'),{
       job_id:job.id,request_id:job.request_id||null,fallback_job_id:job.fallback_job_id||null,fallback_of:job.fallback_of||null,
+      page_state:job.page_state||null,
       chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
       chat_url:job.result_chat_url||job.chat_url||null,action:job.action,status:job.status,execution,
       summary:String(summary).slice(0,500)});
@@ -667,6 +678,7 @@ export class FileQueue {
       job.result_chat_url=url;
       if(url)this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
+      job.page_state=pageState(data.page_state);
       if(job.action==='read') {
         job.reply_text=typeof data.reply_text==='string'?data.reply_text.slice(0,MAX_REPLY):null;
         job.reply_generating=data.reply_generating===true;

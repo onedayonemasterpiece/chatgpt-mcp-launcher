@@ -308,3 +308,13 @@ test('a stuck earlier attempt with the mention in front is recognised as our own
  assert.equal(result.status,'sent',JSON.stringify(result));
  assert.equal(f.state.clicks,1);
 });
+
+test('a blocked job describes the window in plain fields for the coordinator',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',draft:'my own notes'});
+ const result=await f.run({action:'continue',prompt:'Review the dataset',own_text:'Review the dataset',effort:'auto'});
+ assert.equal(result.status,'blocked');
+ assert.equal(result.page_state.composer,'present');
+ assert.equal(result.page_state.composer_text,'other_draft');
+ assert.equal(result.page_state.url_kind,'conversation');
+ assert.equal(JSON.stringify(result.page_state).includes('my own notes'),false,'no page text');
+});
