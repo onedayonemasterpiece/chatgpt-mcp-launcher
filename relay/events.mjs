@@ -67,12 +67,15 @@ export function sealer(mcpToken) {
   };
 }
 
-const PRIVATE=new net.BlockList();
+// Separate lists: in one net.BlockList an IPv6 rule such as ::ffff:0:0/96
+// also matches every plain IPv4 address (that blocked all IPv4 callbacks).
+const PRIVATE4=new net.BlockList(), PRIVATE6=new net.BlockList();
 for(const [a,p] of [['0.0.0.0',8],['10.0.0.0',8],['100.64.0.0',10],['127.0.0.0',8],['169.254.0.0',16],
-  ['172.16.0.0',12],['192.0.0.0',24],['192.168.0.0',16],['198.18.0.0',15],['224.0.0.0',3]]) PRIVATE.addSubnet(a,p,'ipv4');
+  ['172.16.0.0',12],['192.0.0.0',24],['192.168.0.0',16],['198.18.0.0',15],['224.0.0.0',3]]) PRIVATE4.addSubnet(a,p,'ipv4');
 for(const [a,p] of [['::',127],['::ffff:0:0',96],['64:ff9b::',96],['2002::',16],['2001::',32],['fc00::',7],['fe80::',10],['ff00::',8]])
-  PRIVATE.addSubnet(a,p,'ipv6');
-const isPublic=(address,family)=>!PRIVATE.check(address,family===6?'ipv6':'ipv4');
+  PRIVATE6.addSubnet(a,p,'ipv6');
+export const isPublic=(address,family)=>family===6||family==='IPv6' ?
+  !PRIVATE6.check(address,'ipv6') : !PRIVATE4.check(address,'ipv4');
 
 export class DeliveryError extends Error {
   constructor(reason) {super(reason);this.reason=reason;}

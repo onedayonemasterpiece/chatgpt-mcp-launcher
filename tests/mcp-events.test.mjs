@@ -242,3 +242,10 @@ test('subscription accepts a missing delivery mode and the optional device_id fi
   assert.match(sub.id,/^sub_/);
   await assert.rejects(q.subscribe({name:JOB_EVENT,arguments:{project_id:'x'},delivery:{url:'https://callback.example/hook',secret:SECRET}},sender),/unexpected_arguments/);
 });
+
+test('callback address filter: public OpenAI addresses pass, private and mapped ones do not',async()=>{
+  const {isPublic}=await import('../relay/events.mjs');
+  for(const [a,f] of [['104.18.38.184',4],['172.64.149.72',4],['2a06:98c1:3103::6812:26b8',6]]) assert.equal(isPublic(a,f),true,a);
+  for(const [a,f] of [['127.0.0.1',4],['10.1.2.3',4],['172.16.5.5',4],['192.168.1.1',4],['169.254.1.1',4],['100.64.0.1',4],
+    ['::1',6],['fd00::1',6],['fe80::1',6],['::ffff:127.0.0.1',6],['::ffff:104.18.38.184',6]]) assert.equal(isPublic(a,f),false,a);
+});
