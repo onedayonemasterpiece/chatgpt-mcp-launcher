@@ -74,20 +74,40 @@
   function draftText(el) {
     return el.matches('textarea') ? el.value : el.innerText || el.textContent || '';
   }
-  function insertPrompt(el,prompt) {
-    el.focus();
-    if (el.matches('textarea')) {
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-      nativeSetter.call(el,prompt);
-      el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
-    } else {
-      // execCommand inserts text through the same editing channel as human input.
-      // Does not submit; the send button is clicked independently.
-      const inserted = document.execCommand('insertText',false,prompt);
-      if (!inserted) return false;
-      el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
+  async function insertPrompt(el,prompt) {
+    let command=null;
+    const failure = reason => ({ok:false,message:'Could not enter prompt: '+reason+' '+JSON.stringify({
+      connected:el.isConnected,document_focused:document.hasFocus(),
+      editor_focused:document.activeElement===el,
+      command,expected_chars:prompt.length,actual_chars:draftText(composer()||el).length,
+    })});
+    // Hydration can replace the editor between discovery and input. Never
+    // insert into a stale node, or replace a draft that appeared meanwhile.
+    if(composer()!==el || draftText(el).trim()) return failure('editor changed');
+    try {
+      el.focus();
+      if (el.matches('textarea')) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
+        nativeSetter.call(el,prompt);
+        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
+      } else {
+        // execCommand inserts text through the same editing channel as human input.
+        // Set an explicit caret: focus alone may leave a stale selection. Its
+        // return flag is advisory; only the resulting editor text proves input.
+        caretToEnd(el);
+        command = document.execCommand('insertText',false,prompt);
+        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:prompt}));
+      }
+    } catch {
+      return failure('editing command failed');
     }
-    return core(draftText(el))===core(prompt);
+    // Read React/editor reconciliation before deciding; do not insert again.
+    for(let i=0;i<10;i++) {
+      await sleep(100);
+      const current=composer();
+      if(current && core(draftText(current))===core(prompt)) return {ok:true};
+    }
+    return failure(command===false ? 'editing command refused or text differs' : 'text did not settle');
   }
   function submitButton(input) {
     // Trust explicit send-button identity rather than page-wide generic buttons.
@@ -246,14 +266,15 @@
     const effortNote=effortResult.ok ? '' : ` Effort left unchanged: ${effortResult.message}.`;
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
-    if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
+    const insertion=await insertPrompt(ready,job.prompt);
+    if (!insertion.ok) return {status:'blocked',message:insertion.message};
     let mentionNote='';
     if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) {
       await addMention(ready,job.mention);
       // A launch matters more than the mention: if it landed anywhere but after
       // the prompt, start over with the prompt alone (live job, 22 Oct 07:42 UTC).
       if (!core(draftText(ready)).startsWith(core(job.prompt))) {
-        if (!clearComposer(ready) || !insertPrompt(ready,job.prompt)) {
+        if (!clearComposer(ready) || !(await insertPrompt(ready,job.prompt)).ok) {
           return {status:'blocked',message:'The app mention landed in the wrong place and the prompt could not be re-entered; draft left for manual review'};
         }
         mentionNote=' App mention skipped (it landed in the wrong place).';
