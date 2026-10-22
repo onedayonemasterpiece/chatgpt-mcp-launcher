@@ -10,7 +10,8 @@ import net from 'node:net';
 export const JOB_EVENT='chatgpt_launcher.job_update';
 export const REMINDER_EVENT='chatgpt_launcher.coordination_reminder';
 const STRING={type:'string'};
-const NO_ARGUMENTS={type:'object',properties:{},additionalProperties:false};
+// Same shape as the working projects-hub events: one optional filter argument.
+const NO_ARGUMENTS={type:'object',properties:{device_id:{type:'string',description:'Leave unset (default desktop).'}},additionalProperties:false};
 export const EVENT_DEFINITIONS=[
   {name:JOB_EVENT,delivery:['webhook'],inputSchema:NO_ARGUMENTS,
     description:'A launcher job needs attention: ChatGPT reported done/failed, the job was blocked, failed, needs review or expired, '+

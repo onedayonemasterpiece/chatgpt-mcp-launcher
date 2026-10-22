@@ -154,9 +154,22 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
         if (data.method.startsWith('notifications/')) {res.writeHead(202);return res.end();}
         let out;
         const requested=data.params?._meta?.[META_VERSION];
+        // One line per MCP request: method, protocol, outcome. Never URLs, secrets or arguments.
+        const logged=()=>{
+          const e=out?.error, r=out?.result;
+          console.log(JSON.stringify({event:'mcp_request',method:data.method,
+            tool:data.method==='tools/call'?String(data.params?.name||'').slice(0,60):undefined,
+            event_name:data.method.startsWith('events/')?String(data.params?.name||'').slice(0,80):undefined,
+            protocol:requested===undefined?'legacy':String(requested).slice(0,20),
+            result:e?'error':r?.isError?'tool_error':'ok',code:e?.code,reason:e?.data?.reason,
+            delivery_mode:data.method==='events/subscribe'?String(data.params?.delivery?.mode??'(none)').slice(0,20):undefined,
+            argument_keys:data.method.startsWith('events/')?Object.keys(data.params?.arguments||{}).slice(0,5):undefined}));
+        };
         const isModern=requested!==undefined;
         if (isModern && requested!==MODERN) {
-          return send(res,200,rpcError(data.id,-32022,'Unsupported protocol version',{supported:[MODERN],requested}));
+          out=rpcError(data.id,-32022,'Unsupported protocol version',{supported:[MODERN],requested});
+          logged();
+          return send(res,200,out);
         }
         const wrap=(result,cacheable)=>isModern?modern(result,cacheable):result;
         if (data.method==='initialize') {
@@ -204,6 +217,7 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
             out=rpcOk(data.id,wrap(resultText(value)));
           } catch(err) {out=rpcOk(data.id,wrap(resultText({error:err.message},true)));}
         } else out=rpcError(data.id,-32601,'Unknown method');
+        logged();
         return send(res,200,out);
       }
       if (url.pathname==='/device/poll' || url.pathname==='/device/report') {

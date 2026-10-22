@@ -235,3 +235,10 @@ test('enough active agents means no reminder; diagnostics show subscriptions and
   assert.equal(status.coordination.active_agents.length,1);
   assert.equal(JSON.stringify(status).includes(SECRET),false,'the webhook secret is never shown');
 });
+
+test('subscription accepts a missing delivery mode and the optional device_id filter, like projects-hub',async t=>{
+  const {q,sender}=harness(await tempFile(t));
+  const sub=await q.subscribe({name:JOB_EVENT,arguments:{device_id:'desktop'},delivery:{url:'https://callback.example/hook',secret:SECRET}},sender);
+  assert.match(sub.id,/^sub_/);
+  await assert.rejects(q.subscribe({name:JOB_EVENT,arguments:{project_id:'x'},delivery:{url:'https://callback.example/hook',secret:SECRET}},sender),/unexpected_arguments/);
+});
