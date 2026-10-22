@@ -315,7 +315,9 @@
     if (!job || job.action!=='read') return {status:'failed',message:'Invalid job'};
     if (!isConversationUrl(window.location.href)) return {status:'blocked',message:'Not on a ChatGPT conversation URL'};
     await waitForComposer(); // the composer appearing means the conversation has rendered
-    for (let i=0;i<20 && !lastReply();i++) await sleep(500);
+    // A freshly opened tab can take a long time to load the conversation history.
+    const anyMessage=()=>document.querySelectorAll('[data-message-author-role]').length>0;
+    for (let i=0;i<120 && !anyMessage();i++) await sleep(500);
     await sleep(1000);
     const text=lastReply();
     const busy=replyInProgress();
