@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} from './conversations.mjs';
+import {DeliveryError,EVENT_DEFINITIONS,JOB_EVENT,REMINDER_EVENT,eventId,subscriptionId,validSecret} from './events.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
 const REPORT_STATES = ['sent','opened','read','closed','blocked','failed','needs_review'];
@@ -25,7 +26,13 @@ export function validChatUrl(value) {
   } catch { return false; }
 }
 
-const MODEL_STATES = ['started','done','failed'];
+const MODEL_STATES = ['started','progress','done','failed'];
+// Statuses that always produce a job_update event for subscribers.
+const NOTIFY_STATUSES = ['blocked','failed','needs_review','expired','closed'];
+const MAX_SUBSCRIPTION_MS = 86_400_000;
+const MAX_OUTBOX = 1000;
+const MAX_ATTEMPTS = 5;
+const iso = ms => ms ? new Date(ms).toISOString() : null;
 // Appended to every prompt Chrome sends: the ChatGPT conversation itself
 // confirms through MCP that it got the prompt and reports its result.
 // This needs no reading of the ChatGPT page.
@@ -77,11 +84,17 @@ function requireString(value, name, maxLen = 256) {
 }
 
 export class FileQueue {
-  #state = { jobs: [], device_status: {}, chats: [] };
+  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null };
   #serial = Promise.resolve();
-  constructor(file, devices) {
+  // silenceMs: no report from the agent for this long after started/progress
+  // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
+  constructor(file, devices, {now=()=>Date.now(),silenceMs=30*60_000,confirmMs=10*60_000,seal=null}={}) {
     this.file = file;
     this.devices = devices;
+    this.now = now;
+    this.silenceMs = silenceMs;
+    this.confirmMs = confirmMs;
+    this.seal = seal;
     this.deviceObservations = new Map();
     this.lastPersistedHeartbeat = new Map();
     this.seenThisProcess = new Set();
@@ -173,6 +186,8 @@ export class FileQueue {
       updater_trigger:observation?.updater_trigger || null,
       updater_error:observation?.updater_error || null,
       last_job:lastJob ? this.#public(lastJob) : null,
+      events:this.eventsStatus(),
+      coordination:this.coordinationStatus(),
     };
   }
   async initialize() {
@@ -180,7 +195,11 @@ export class FileQueue {
     try {
       const parsed = JSON.parse(await readFile(this.file, 'utf8'));
       if (!Array.isArray(parsed.jobs)) throw new Error('Invalid state');
-      this.#state = {...parsed,device_status:parsed.device_status||{},chats:Array.isArray(parsed.chats)?parsed.chats:[]};
+      this.#state = {...parsed,device_status:parsed.device_status||{},chats:Array.isArray(parsed.chats)?parsed.chats:[],
+        subscriptions:Array.isArray(parsed.subscriptions)?parsed.subscriptions:[],
+        outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null};
+      // A delivery interrupted by a restart is simply retried with the same eventId.
+      for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
       for(const old of parsed.jobs) {
         const url=canonicalChatUrl(old.result_chat_url);
         if(url && !this.#state.chats.some(c=>c.device_id===old.device_id&&c.chat_url===url))
@@ -236,13 +255,13 @@ export class FileQueue {
           return this.#public(existing);
         }
       }
-      this.#expire();
+      this.#expire(this.now());
       if(this.#state.jobs.length>=MAX_JOBS) {
         const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status));
         if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
         this.#state.jobs.splice(removable,1);
       }
-      const now=new Date().toISOString();
+      const now=new Date(this.now()).toISOString();
       const job={
         id:randomUUID(),action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
@@ -282,34 +301,262 @@ export class FileQueue {
     if (!job) return null;
     const {prompt, ...publicJob} = job;
     return {job_id:job.id,...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
-      next_step:nextStep(job)};
+      execution:this.#execution(job),next_step:nextStep(job)};
+  }
+  // What is known about the work itself, separate from delivery of the prompt.
+  // Only real reports from the agent count; silence is reported as such.
+  #execution(job,now=this.now()) {
+    if(job.action!=='start'&&job.action!=='continue') return null;
+    if(job.model_status==='done'||job.model_status==='failed') return job.model_status;
+    if(job.model_status==='started'||job.model_status==='progress') {
+      return now-Date.parse(job.model_last_report_at||job.model_started_at)>this.silenceMs ? 'unconfirmed' : job.model_status;
+    }
+    if(['queued','claimed','blocked','expired','failed'].includes(job.status)) return 'not_started';
+    if(job.status==='sent') return now-Date.parse(job.reported_at)>this.confirmMs ? 'unconfirmed' : 'awaiting_confirmation';
+    return 'unknown';
+  }
+  #notifyJob(job,reason) {
+    const execution=this.#execution(job);
+    const summary=(job.model_status==='done'||job.model_status==='failed' ? job.model_summary : job.message) || '';
+    this.#emit(JOB_EVENT,[job.id,job.status,job.model_status||'',reason].join('|'),{
+      job_id:job.id,request_id:job.request_id||null,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
+      chat_url:job.result_chat_url||job.chat_url||null,action:job.action,status:job.status,execution,
+      summary:String(summary).slice(0,500)});
+  }
+  // Queues one event per active subscription. The eventId is derived from what
+  // happened, so the same fact never produces two different events.
+  #emit(name,key,data) {
+    const now=this.now();
+    const id=eventId(name,key);
+    const subscribers=this.#state.subscriptions.filter(s=>s.name===name&&s.state==='active'&&s.expires_at>now);
+    if(!subscribers.length) {
+      this.#state.events_without_subscriber=(this.#state.events_without_subscriber||0)+1;
+      this.#state.last_event_without_subscriber={event_id:id,name,at:iso(now)};
+    }
+    for(const sub of subscribers) {
+      if(this.#state.outbox.some(e=>e.event_id===id&&e.subscription_id===sub.id)) continue;
+      this.#state.outbox.push({event_id:id,subscription_id:sub.id,name,timestamp:iso(now),
+        data:{...data,at:iso(now)},state:'pending',attempts:0,next_at:now});
+    }
+    while(this.#state.outbox.length>MAX_OUTBOX) {
+      const done=this.#state.outbox.findIndex(e=>e.state!=='pending');
+      this.#state.outbox.splice(done>=0?done:0,1);
+    }
+  }
+  listEvents() {return {events:EVENT_DEFINITIONS};}
+  async subscribe(params,sender) {
+    const {name,arguments:args={},delivery,ttlMs}=params||{};
+    if(!EVENT_DEFINITIONS.some(e=>e.name===name)) throw new DeliveryError('unknown_event');
+    if(args && typeof args==='object' && Object.keys(args).length) throw new DeliveryError('unexpected_arguments');
+    if(delivery?.mode!=='webhook'||typeof delivery.url!=='string') throw new DeliveryError('invalid_url');
+    if(!validSecret(delivery.secret)) throw new DeliveryError('invalid_secret');
+    if(ttlMs!==undefined&&ttlMs!==null&&!(Number.isInteger(ttlMs)&&ttlMs>0)) throw new DeliveryError('invalid_ttl');
+    const id=subscriptionId(name,delivery.url);
+    const old=this.#state.subscriptions.find(s=>s.id===id);
+    const cached=old&&old.state==='active'&&old.verified_at>this.now()-300_000&&this.seal.open(old.secret)===delivery.secret;
+    if(!cached) await sender.verify(delivery.url,id,delivery.secret);
+    return this.#run(async()=>{
+      const now=this.now();
+      const expires=now+Math.min(ttlMs??MAX_SUBSCRIPTION_MS,MAX_SUBSCRIPTION_MS);
+      const sub={...(old||{}),id,name,url:delivery.url,secret:this.seal.seal(delivery.secret),state:'active',
+        verified_at:cached?old.verified_at:now,expires_at:expires,updated_at:now};
+      const i=this.#state.subscriptions.findIndex(s=>s.id===id);
+      if(i>=0)this.#state.subscriptions[i]=sub;else this.#state.subscriptions.push(sub);
+      await this.#save();
+      return {id,refreshBefore:iso(expires),cursor:null,truncated:false};
+    });
+  }
+  async unsubscribe(params) {
+    return this.#run(async()=>{
+      const id=subscriptionId(params?.name,params?.delivery?.url);
+      const sub=this.#state.subscriptions.find(s=>s.id===id);
+      if(sub) {
+        sub.state='inactive';
+        for(const e of this.#state.outbox) if(e.subscription_id===id&&e.state==='pending') e.state='cancelled';
+        await this.#save();
+      }
+      return {};
+    });
+  }
+  // Sends at most one due event. Returns false when nothing is due.
+  async deliverDue(sender) {
+    const picked=await this.#run(async()=>{
+      const now=this.now();
+      const item=this.#state.outbox.find(e=>e.state==='pending'&&e.next_at<=now);
+      if(!item) return null;
+      const sub=this.#state.subscriptions.find(s=>s.id===item.subscription_id);
+      if(!sub||sub.state!=='active'||sub.expires_at<=now) {
+        Object.assign(item,{state:'cancelled',last_error:'subscription_inactive'});
+        await this.#save();
+        return {skip:true};
+      }
+      item.state='sending';
+      item.attempts++;
+      return {item,sub};
+    });
+    if(!picked) return false;
+    if(picked.skip) return true;
+    const {item,sub}=picked;
+    let status=null,reason=null;
+    try {
+      ({status}=await sender.send(sub.url,sub.id,
+        {eventId:item.event_id,name:item.name,timestamp:item.timestamp,cursor:null,data:item.data},this.seal.open(sub.secret)));
+      if(status<200||status>=300) reason='http_'+status;
+    } catch(err) {reason=err?.reason||'delivery_failed';}
+    await this.#run(async()=>{
+      const now=this.now();
+      const accepted=!reason;
+      // Same eventId on every attempt; no retry on 410/413 or other permanent errors.
+      const retry=!accepted&&item.attempts<MAX_ATTEMPTS&&(status===null||status>=500||[408,425,429].includes(status));
+      Object.assign(item,{state:accepted?'accepted':retry?'pending':'error',last_status:status,last_error:reason,
+        next_at:now+Math.min(60_000,1000*2**item.attempts),...(accepted?{accepted_at:now}:{})});
+      if(status===410) sub.state='gone';
+      Object.assign(sub,{last_delivery_at:now,last_status:status,last_error:reason});
+      await this.#save();
+    });
+    return true;
+  }
+  eventsStatus() {
+    const count=state=>this.#state.outbox.filter(e=>e.state===state).length;
+    const failed=[...this.#state.outbox].reverse().find(e=>e.state==='error');
+    return {
+      subscriptions:this.#state.subscriptions.map(s=>({id:s.id,name:s.name,state:s.state,
+        expires_at:iso(s.expires_at),verified_at:iso(s.verified_at),last_delivery_at:iso(s.last_delivery_at),
+        last_status:s.last_status??null,last_error:s.last_error??null})),
+      outbox:{pending:count('pending')+count('sending'),accepted:count('accepted'),error:count('error'),cancelled:count('cancelled')},
+      last_undelivered:failed?{event_id:failed.event_id,name:failed.name,attempts:failed.attempts,last_error:failed.last_error}:null,
+      events_without_subscriber:this.#state.events_without_subscriber||0,
+      last_event_without_subscriber:this.#state.last_event_without_subscriber||null,
+    };
+  }
+  // Coordination is only a reminder for the coordinator: it never starts agents.
+  async coordinationSet(args={}) {
+    return this.#run(async()=>{
+      const now=this.now();
+      const current=this.#state.coordination;
+      const goal=args.goal===undefined ? current?.goal : requireString(args.goal,'goal',500);
+      if(!goal) throw Error('goal is required to open a coordination');
+      const minAgents=args.min_agents??current?.min_agents??2;
+      const idle=args.idle_minutes??current?.idle_minutes??15;
+      if(!Number.isInteger(minAgents)||minAgents<1||minAgents>20) throw Error('min_agents must be 1-20');
+      if(typeof idle!=='number'||idle<1||idle>240) throw Error('idle_minutes must be 1-240');
+      let pausedUntil=current?.paused_until??null, pauseReason=current?.pause_reason??null;
+      if(args.pause_minutes!==undefined) {
+        if(typeof args.pause_minutes!=='number'||args.pause_minutes<0||args.pause_minutes>1440) throw Error('pause_minutes must be 0-1440');
+        if(args.pause_minutes>0) {
+          pauseReason=requireString(args.pause_reason,'pause_reason',300);
+          pausedUntil=now+args.pause_minutes*60_000;
+        } else {pausedUntil=null;pauseReason=null;}
+      }
+      this.#state.coordination={id:current?.id||'coord_'+randomUUID(),goal,min_agents:minAgents,idle_minutes:idle,
+        paused_until:pausedUntil,pause_reason:pauseReason,opened_at:current?.opened_at||now,updated_at:now,
+        below_since:current?.below_since??null,last_reminder_at:current?.last_reminder_at??null,reminders:current?.reminders||0};
+      await this.#save();
+      return this.coordinationStatus();
+    });
+  }
+  async coordinationClose(reason) {
+    return this.#run(async()=>{
+      const current=this.#state.coordination;
+      if(!current) return {open:false};
+      this.#state.last_coordination={...current,closed_at:this.now(),close_reason:typeof reason==='string'?reason.slice(0,300):null};
+      this.#state.coordination=null;
+      await this.#save();
+      return {open:false,closed:current.id};
+    });
+  }
+  #activeAgents(now) {
+    const latest=new Map();
+    for(const job of this.#state.jobs) {
+      const exec=this.#execution(job,now);
+      if(exec!=='started'&&exec!=='progress') continue;
+      latest.set(job.result_chat_url||job.chat_url||job.id,job);
+    }
+    return [...latest.values()];
+  }
+  coordinationStatus() {
+    const c=this.#state.coordination;
+    if(!c) return {open:false};
+    const now=this.now();
+    return {open:true,id:c.id,goal:c.goal,min_agents:c.min_agents,idle_minutes:c.idle_minutes,
+      paused_until:c.paused_until>now?iso(c.paused_until):null,pause_reason:c.paused_until>now?c.pause_reason:null,
+      active_agents:this.#activeAgents(now).map(j=>({job_id:j.id,chat_id:chatIdFromUrl(j.result_chat_url||j.chat_url),
+        execution:this.#execution(j,now),last_report_at:j.model_last_report_at||j.model_started_at||null})),
+      below_minimum_since:iso(c.below_since),last_reminder_at:iso(c.last_reminder_at),opened_at:iso(c.opened_at)};
+  }
+  // Runs about once a minute: silence and coordination checks.
+  async tick() {
+    return this.#run(async()=>{
+      const now=this.now();
+      let changed=this.#expire(now);
+      for(const job of this.#state.jobs) {
+        if(this.#execution(job,now)!=='unconfirmed') continue;
+        const key=job.model_last_report_at||job.model_started_at||job.reported_at;
+        if(job.unconfirmed_for===key) continue;
+        job.unconfirmed_for=key;
+        this.#notifyJob(job,'unconfirmed|'+key);
+        changed=true;
+      }
+      const c=this.#state.coordination;
+      if(c && !(c.paused_until>now)) {
+        const active=this.#activeAgents(now);
+        if(active.length>=c.min_agents) {
+          if(c.below_since||c.last_reminder_at) {c.below_since=null;c.last_reminder_at=null;changed=true;}
+        } else {
+          // Time spent paused does not count as idle.
+          const start=Math.max(c.below_since||now,c.paused_until||0);
+          if(c.below_since!==start) {c.below_since=start;changed=true;}
+          const idle=c.idle_minutes*60_000;
+          if(now-start>=idle && (!c.last_reminder_at||now-c.last_reminder_at>=idle)) {
+            c.reminders=(c.reminders||0)+1;
+            c.last_reminder_at=now;
+            const unfinished=this.#state.jobs.filter(j=>(j.action==='start'||j.action==='continue')&&
+              !['done','failed','not_started'].includes(this.#execution(j,now))).slice(-10)
+              .map(j=>({job_id:j.id,chat_id:chatIdFromUrl(j.result_chat_url||j.chat_url),execution:this.#execution(j,now)}));
+            this.#emit(REMINDER_EVENT,c.id+'|'+c.reminders,{coordination_id:c.id,goal:c.goal,active_agents:active.length,
+              min_agents:c.min_agents,idle_minutes:c.idle_minutes,below_minimum_since:iso(start),unfinished});
+            changed=true;
+          }
+        }
+      }
+      if(changed) await this.#save();
+    });
   }
   // Called by the ChatGPT conversation itself (see callbackFooter).
   async modelReport(data) {
     return this.#run(async()=>{
       const id=requireString(data.job_id,'job_id',100);
-      if(!MODEL_STATES.includes(data.status))throw Error('status must be started, done or failed');
+      if(!MODEL_STATES.includes(data.status))throw Error('status must be started, progress, done or failed');
       const job=this.#state.jobs.find(j=>j.id===id&&(j.action==='start'||j.action==='continue'));
       if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
-      const now=new Date().toISOString();
-      job.model_status=data.status;
-      if(data.status==='started') job.model_started_at||=now; else job.model_finished_at=now;
-      if(typeof data.summary==='string') job.model_summary=data.summary.slice(0,MAX_REPLY);
+      const now=new Date(this.now()).toISOString();
+      // A late "started" or "progress" never undoes a finished report.
+      const finished=job.model_status==='done'||job.model_status==='failed';
+      const ongoing=data.status==='started'||data.status==='progress';
+      if(!(finished&&ongoing)) job.model_status=data.status;
+      job.model_last_report_at=now;
+      if(data.status==='started') job.model_started_at||=now;
+      if(!ongoing) job.model_finished_at=now;
+      if(typeof data.summary==='string') {
+        if(ongoing) job.model_progress=data.summary.slice(0,500);
+        else job.model_summary=data.summary.slice(0,MAX_REPLY);
+      }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
         Object.assign(job,{status:'sent',timed_out:false,reported_at:job.reported_at||now,
           message:'Delivery confirmed by ChatGPT itself via chatgpt_report'});
       }
+      if(!ongoing) this.#notifyJob(job,'model');
       await this.#save();
       return {ok:true,job_id:id,model_status:job.model_status};
     });
   }
   status(jobId) {
-    if(this.#expire()) void this.#run(()=>this.#save());
+    if(this.#expire(this.now())) void this.#run(()=>this.#save());
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
   }
   // Gives every job that has waited too long a final, unambiguous status.
-  #expire(now=Date.now()) {
+  #expire(now=this.now()) {
     let changed=false;
     for(const job of this.#state.jobs) {
       const since=Date.parse(job.status==='queued' ? job.created_at : job.claimed_at);
@@ -324,6 +571,7 @@ export class FileQueue {
           message:sends ? 'Chrome did not report back within 15 minutes; the prompt may or may not have been sent' :
             'Chrome did not report back within 15 minutes; nothing was sent, repeating is safe'});
       }
+      this.#notifyJob(job,'timeout');
       changed=true;
     }
     return changed;
@@ -333,11 +581,11 @@ export class FileQueue {
   }
   async claim(deviceId) {
     return this.#run(async()=>{
-      if(this.#expire()) await this.#save(); // an expired prompt must never be handed out
+      if(this.#expire(this.now())) await this.#save(); // an expired prompt must never be handed out
       const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
       if(!job)return null;
       job.status='claimed';
-      job.claimed_at=new Date().toISOString();
+      job.claimed_at=new Date(this.now()).toISOString();
       await this.#save();
       const sends=job.action==='start'||job.action==='continue';
       return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt,
@@ -384,7 +632,8 @@ export class FileQueue {
         job.reply_generating=data.reply_generating===true;
         job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
-      job.reported_at=new Date().toISOString();
+      job.reported_at=new Date(this.now()).toISOString();
+      if(NOTIFY_STATUSES.includes(job.status)) this.#notifyJob(job,'chrome');
       await this.#save();
       return this.#public(job);
     });

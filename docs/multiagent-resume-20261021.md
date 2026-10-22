@@ -37,3 +37,20 @@ Owner decision (21 October 2026): results are not read from the screen. To make 
 ## Privacy
 
 Owner decision (21 October 2026): the last ChatGPT reply of a conversation is returned through the private, authenticated MCP only by an explicit `chatgpt_read_reply` call. Screenshots, DOM dumps, cookies and prompts are never returned. Slack completion is confirmed separately with the Slack tool.
+
+## Events and coordination (22 October 2026)
+
+dot's request, kept minimal: no new orchestrator, all existing tools unchanged.
+
+**Protocol.** OpenAI MCP Events need MCP `2026-07-28`. The relay serves it next to the `2025-11-25` handshake: `server/discover` advertises `capabilities.events`, and modern requests (`params._meta["io.modelcontextprotocol/protocolVersion"]`) get `resultType`, `cacheScope`/`ttlMs` and `_meta.serverInfo`; other versions get `-32022`. Legacy clients get exactly the old responses. Checked with the MCP Python SDK 2.3.0 client in both `auto` (discover) and `legacy` modes.
+
+**Events** (`events/list`, `events/subscribe`, `events/unsubscribe`; webhook delivery as in projects-hub):
+
+- `chatgpt_launcher.job_update`: ChatGPT reported `done`/`failed`; the job became `blocked`, `failed`, `needs_review`, `expired` or `closed`; or the agent went silent (`execution: unconfirmed`). Payload: `job_id`, `request_id`, `chat_id`, `chat_url`, `action`, `status`, `execution`, `summary` (≤ 500 characters: the model's summary or the reason), `at`. Never prompt or chat text.
+- `chatgpt_launcher.coordination_reminder`: see below.
+
+Subscribing verifies the callback with a signed challenge. Events are signed with Standard Webhooks (`webhook-id` = `eventId`), sent only over HTTPS to public addresses without redirects, at most 5 attempts with backoff (none after 410/413/other permanent 4xx; 410 marks the subscription gone). The `eventId` is derived from the fact itself, so a repeated report or a retry never yields a different event. Subscriptions (secret encrypted with a key derived from the relay token, TTL ≤ 24 h, refreshed by ChatGPT) and undelivered events live in the same state file and survive restarts. `chatgpt_device_status` shows `events` (subscriptions, last delivery and error, pending/failed counts, events emitted while nobody was subscribed) and `coordination`.
+
+**Execution** (in every job result, separate from delivery `status`): `not_started`, `awaiting_confirmation` (sent, no report yet), `started`, `progress` (the agent may call `chatgpt_report(status="progress", summary)`; the last note is `model_progress`), `done`, `failed`, `unconfirmed` (no report for 30 min after started/progress, or 10 min after sending: unknown, never treated as done), `unknown` (needs review). A late `started`/`progress` never undoes `done`/`failed`. The page's generation indicator is never used as proof of completion.
+
+**Coordination reminder.** `chatgpt_coordination_set(goal, min_agents=2, idle_minutes=15, pause_minutes?, pause_reason?)` opens or updates it; `chatgpt_coordination_close(reason?)` ends it. Active agents are conversations whose latest job reports `started`/`progress` and is not silent. While fewer than `min_agents` are active for `idle_minutes`, one reminder is sent (goal, counts, up to 10 unfinished jobs), then at most once per `idle_minutes`. A pause needs a reason and a duration; paused time does not count, and reminders resume when it expires. It never starts agents; finishing one of dot's replies does not close it.
