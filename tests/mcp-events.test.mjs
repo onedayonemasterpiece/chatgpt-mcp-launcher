@@ -259,11 +259,39 @@ test('an agent that needs a decision reports blocked: dot is told to pass the ex
   assert.match(claimed.prompt,/status=blocked/);
   await q.report('desktop',{job_id:job.id,status:'sent',chat_url:URL});
   await q.modelReport({job_id:job.id,status:'blocked',summary:'Need the owner to approve resetting the Dataset version'});
-  await q.modelReport({job_id:job.id,status:'progress'}); // cannot undo blocked
   await flush(q,sender);
   const st=q.status(job.id);
   assert.equal(st.execution,'blocked');
   assert.match(st.next_step,/owner now/);
   assert.equal(sent.length,1);
   assert.deepEqual([sent[0].data.execution,sent[0].data.summary],['blocked','Need the owner to approve resetting the Dataset version']);
+});
+
+test('blocked is not a dead end: resuming in the same chat or by a new continue both work',async t=>{
+  const {q,sent,sender}=harness(await tempFile(t));
+  await subscribeTo(q,sender,JOB_EVENT);
+  await q.coordinationSet({goal:'resume test',min_agents:1,idle_minutes:15});
+  const job=await q.enqueue({action:'start',prompt:'task'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:job.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:job.id,status:'blocked',summary:'Need approval A'});
+  assert.equal(q.coordinationStatus().active_agents.length,0);
+  // Path 1: the owner answers in the agent's own chat; the agent goes on with the same job.
+  await q.modelReport({job_id:job.id,status:'started'});
+  assert.equal(q.status(job.id).execution,'started','resuming after blocked is visible');
+  assert.equal(q.coordinationStatus().active_agents.length,1,'and counts as active again');
+  await q.modelReport({job_id:job.id,status:'blocked',summary:'Need approval B'});
+  await q.modelReport({job_id:job.id,status:'blocked',summary:'Need approval B'}); // repeated: same news
+  await flush(q,sender);
+  assert.deepEqual(sent.map(e=>e.data.summary),['Need approval A','Need approval B'],'a second blocker wakes dot again, once');
+  // Path 2: dot passes the decision on with a new continue in the same chat.
+  const next=await q.enqueue({action:'continue',chat_ref:ID,prompt:'Approved: go on'});
+  assert.equal(next.chat_url,URL);
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:next.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:next.id,status:'started'});
+  await q.modelReport({job_id:next.id,status:'done',summary:'finished'});
+  await flush(q,sender);
+  assert.equal(q.status(next.id).execution,'done');
+  assert.equal(sent.at(-1).data.summary,'finished');
 });
