@@ -223,3 +223,25 @@ test('close job has no prompt and can only report closed or blocked',async t=>{
   assert.equal(done.status,'closed');
   assert.match(done.next_step,/stays in ChatGPT/);
 });
+
+test('retry re-sends the exact prompt only when nothing was sent, once',async t=>{
+  const {q}=await setup(t);
+  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'Exact long task text'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:a.id,status:'blocked',message:'Composer contents changed before submission'});
+  assert.match(q.status(a.id).next_step,/chatgpt_retry/);
+  const r=await q.retry(a.id);
+  assert.equal(r.retry_of,a.id);
+  assert.equal(r.chat_url,URL);
+  assert.equal((await q.retry(a.id)).id,r.id,'a repeated retry call does not create a second job');
+  const claimed=await q.claim('desktop');
+  assert.equal(claimed.own_text,'Exact long task text','the same text lets Chrome replace its own draft');
+  const b=await q.enqueue({action:'start',prompt:'maybe sent'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:b.id,status:'needs_review'});
+  await assert.rejects(q.retry(b.id),/may already have been sent/);
+  const c=await q.enqueue({action:'start',prompt:'confirmed'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:c.id,status:'sent',chat_url:URL});
+  await assert.rejects(q.retry(c.id),/sent nothing/);
+});
