@@ -236,6 +236,7 @@ async function execute(job) {
   if(!result?.result||typeof result.result.status!=='string')throw Error('Missing browser action result');
   const out={status:result.result.status,chat_url:result.result.chat_url||null,
     ...(result.result.page_state&&typeof result.result.page_state==='object'?{page_state:result.result.page_state}:{}),
+    ...(result.result.dom_probe&&typeof result.result.dom_probe==='object'?{dom_probe:result.result.dom_probe}:{}),
     message:result.result.message||''};
   if(job.action==='read') {
     out.reply_text=typeof result.result.reply_text==='string' ? result.result.reply_text.slice(0,20000) : null;
@@ -247,8 +248,8 @@ async function execute(job) {
 async function flushPending(config) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
-  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state}=pendingReport;
-  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state});}
+  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe}=pendingReport;
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe});}
   catch(err) {
     // A report the relay refuses outright would be resent forever and block
     // heartbeats and every later job. Network errors and 401 stay pending.
