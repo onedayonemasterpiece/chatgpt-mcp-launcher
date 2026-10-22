@@ -204,6 +204,7 @@ test('coordination reminds only after the idle threshold, respects a timed pause
   assert.equal(sent.length,1);
   assert.deepEqual([sent[0].data.goal,sent[0].data.active_agents,sent[0].data.min_agents],['RKB night work',1,2]);
   assert.equal(sent[0].data.unfinished[0].job_id,job.id);
+  assert.match(sent[0].data.next_step,/pause_reason/,'tells the coordinator how to stop the noise when waiting');
   clock.t+=5*MIN; await q.tick(); await flush(q,sender);
   assert.equal(sent.length,1,'at most one reminder per threshold');
   await assert.rejects(q.coordinationSet({pause_minutes:30}),/pause_reason/);
