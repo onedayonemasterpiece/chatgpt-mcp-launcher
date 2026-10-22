@@ -24,7 +24,7 @@ export const EVENT_DEFINITIONS=[
       'Check unfinished work and assign useful tasks, explain the wait with a pause, or close the coordination.',
     payloadSchema:{type:'object',properties:{coordination_id:STRING,goal:STRING,active_agents:{type:'integer'},
       min_agents:{type:'integer'},idle_minutes:{type:'number'},below_minimum_since:STRING,
-      unfinished:{type:'array',maxItems:10},at:STRING},required:['coordination_id','goal','active_agents','min_agents','at'],
+      unfinished:{type:'array',maxItems:10},next_step:STRING,at:STRING},required:['coordination_id','goal','active_agents','min_agents','at'],
       additionalProperties:false}},
 ];
 

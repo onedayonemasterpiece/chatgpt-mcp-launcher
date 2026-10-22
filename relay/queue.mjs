@@ -517,7 +517,11 @@ export class FileQueue {
               !['done','failed','not_started'].includes(this.#execution(j,now))).slice(-10)
               .map(j=>({job_id:j.id,chat_id:chatIdFromUrl(j.result_chat_url||j.chat_url),execution:this.#execution(j,now)}));
             this.#emit(REMINDER_EVENT,c.id+'|'+c.reminders,{coordination_id:c.id,goal:c.goal,active_agents:active.length,
-              min_agents:c.min_agents,idle_minutes:c.idle_minutes,below_minimum_since:iso(start),unfinished});
+              min_agents:c.min_agents,idle_minutes:c.idle_minutes,below_minimum_since:iso(start),unfinished,
+              // Night of 22 Oct: the work waited for the owner and 21 reminders in a row were noise.
+              next_step:'Give useful work to idle agents. If everything is waiting for the owner or another external decision, '+
+                'call chatgpt_coordination_set(pause_minutes, pause_reason) with that reason; reminders resume when the pause ends. '+
+                'If the work is finished or cancelled, call chatgpt_coordination_close.'});
             changed=true;
           }
         }
