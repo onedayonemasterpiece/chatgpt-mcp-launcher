@@ -17,7 +17,7 @@ export const EVENT_DEFINITIONS=[
     description:'A launcher job needs attention: ChatGPT reported done/failed/blocked (blocked = the agent needs a decision; pass it to the owner), the job was blocked, failed, needs review or expired, '+
       'its tab was closed, or the agent went silent (execution unconfirmed). Read chatgpt_task_status(job_id) and continue with chatgpt_continue(chat_ref = chat_id).',
     payloadSchema:{type:'object',properties:{job_id:STRING,request_id:{type:['string','null']},
-      fallback_job_id:{type:['string','null']},fallback_of:{type:['string','null']},chat_id:{type:['string','null']},
+      fallback_job_id:{type:['string','null']},fallback_of:{type:['string','null']},page_state:{type:['object','null']},chat_id:{type:['string','null']},
       chat_url:{type:['string','null']},action:STRING,status:STRING,execution:{type:['string','null']},
       summary:{type:'string',maxLength:500},at:STRING},required:['job_id','status','at'],additionalProperties:false}},
   {name:REMINDER_EVENT,delivery:['webhook'],inputSchema:NO_ARGUMENTS,

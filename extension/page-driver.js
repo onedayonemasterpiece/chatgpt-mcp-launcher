@@ -249,7 +249,32 @@
     const u=new URL(window.location.href);
     return u.origin+u.pathname.replace(/\/+$/,'');
   }
+  // A short, text-only description of the window for the coordinating agent
+  // when a job could not finish: no page text, no screenshot.
+  function pageState(job) {
+    const editors=[...document.querySelectorAll('[contenteditable="true"],textarea')].filter(visible);
+    const el=composer();
+    const text=el ? draftText(el) : '';
+    const own=typeof job?.own_text==='string' ? core(job.own_text).slice(0,30) : '';
+    const body=(document.body?.innerText||'').slice(-20000);
+    return {
+      url_kind:isConversationUrl(window.location.href) ? 'conversation' : 'other',
+      composer:el ? 'present' : editors.length>1 ? 'ambiguous' : 'missing',
+      composer_text:!text.trim() ? 'empty' : own.length>=8 && core(text).includes(own) ? 'our_prompt' : 'other_draft',
+      answering:replyInProgress(),
+      connection_lost:/Соединение прервано|Connection (?:lost|interrupted)|Network error|Ошибка сети/i.test(body),
+      user_messages:document.querySelectorAll('[data-message-author-role="user"]').length,
+      assistant_messages:document.querySelectorAll('[data-message-author-role="assistant"]').length,
+    };
+  }
   async function run(job) {
+    const result=await runSteps(job);
+    if (result && (result.status==='blocked'||result.status==='needs_review')) {
+      try {result.page_state=pageState(job);} catch {}
+    }
+    return result;
+  }
+  async function runSteps(job) {
     if (!job || !['start','continue'].includes(job.action) || !job.prompt || job.prompt.length > 35000) {
       return {status:'failed',message:'Invalid job'};
     }

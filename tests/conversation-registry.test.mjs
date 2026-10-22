@@ -265,3 +265,13 @@ test('a continue that could not be delivered restarts the same prompt in a new c
   await q.report('desktop',{job_id:next.id,status:'blocked'}); // a failed fallback start does not cascade
   assert.equal(q.status(next.id).fallback_job_id,undefined);
 });
+
+test('page_state from Chrome is reduced to known plain fields',async t=>{
+  const {q}=await setup(t);
+  const a=await q.enqueue({action:'start',prompt:'x'});
+  await q.claim('desktop');
+  const r=await q.report('desktop',{job_id:a.id,status:'blocked',page_state:{composer:'present',composer_text:'our_prompt',
+    answering:true,connection_lost:true,user_messages:3,assistant_messages:2,url_kind:'conversation',secret_text:'leak'}});
+  assert.deepEqual(r.page_state,{url_kind:'conversation',composer:'present',composer_text:'our_prompt',answering:true,
+    connection_lost:true,user_messages:3,assistant_messages:2});
+});
