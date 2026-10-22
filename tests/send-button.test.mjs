@@ -318,3 +318,13 @@ test('a blocked job describes the window in plain fields for the coordinator',as
  assert.equal(result.page_state.url_kind,'conversation');
  assert.equal(JSON.stringify(result.page_state).includes('my own notes'),false,'no page text');
 });
+
+test('an ignored Enter is followed by exactly one click once the Send button is enabled',async()=>{
+ // The button becomes findable only after the Enter fallback has fired.
+ const f=fixture({noForm:true,delayedButtonPolls:121});
+ const result=await f.run({action:'start',prompt:'long prompt',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.enters,1);
+ assert.equal(f.state.clicks,1);
+ assert.match(result.message,/after an ignored Enter/);
+});

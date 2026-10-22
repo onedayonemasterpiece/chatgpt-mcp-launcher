@@ -232,6 +232,11 @@ export class FileQueue {
         outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null};
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
+      // Earlier releases left such jobs as needs_review; they certainly sent nothing.
+      for(const job of this.#state.jobs) if(job.status==='needs_review'&&job.page_state?.composer_text==='our_prompt'&&!job.model_status) {
+        job.status='blocked';
+        job.message='Not sent: the prompt is still in the composer. '+(job.message||'');
+      }
       for(const old of parsed.jobs) {
         const url=canonicalChatUrl(old.result_chat_url);
         if(url && !this.#state.chats.some(c=>c.device_id===old.device_id&&c.chat_url===url))
@@ -701,7 +706,10 @@ export class FileQueue {
       // or unexpected URL is dropped instead of failing the whole report.
       let url=canonicalChatUrl(data.chat_url);
       if(job.chat_url&&url&&url!==job.chat_url)url=null;
-      job.status=data.status;
+      // "Not verified" while our own prompt is still sitting in the composer
+      // means it certainly did not go out: say so, so that retry/fallback apply.
+      job.status=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status ? 'blocked' : data.status;
+      if(job.status!==data.status) data={...data,message:'Not sent: the prompt is still in the composer. '+(data.message||'')};
       job.result_chat_url=url;
       if(url)this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
