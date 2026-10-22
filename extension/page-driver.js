@@ -170,7 +170,9 @@
         // No recognised Send button within 3 s: ChatGPT submits on Enter, so
         // press it once (owner decision). A native form submit is ignored by
         // ChatGPT (live job at 18:58 UTC), so it is not used.
-        if(i>=12) return {enter:true,editor:current};
+        // On a long prompt the Send button can take several seconds to enable;
+        // a synthetic Enter is often ignored (live 22 Oct), so it is the last resort.
+        if(i>=120) return {enter:true,editor:current};
       }
       await sleep(250);
     }
@@ -363,6 +365,18 @@
         submit.editor.dispatchEvent(new KeyboardEvent('keydown',init));
         submit.editor.dispatchEvent(new KeyboardEvent('keyup',init));
         method='Enter';
+        // ChatGPT empties the composer at once when it sends. If our prompt is
+        // still there after a few seconds, Enter was ignored and nothing went
+        // out, so one click on the Send button cannot duplicate anything.
+        for(let i=0;i<20;i++) {
+          await sleep(250);
+          const now=composer();
+          if(!now || !promptFirst(draftText(now),job.prompt)) break;
+          if(i===19) {
+            const button=submitButton(now);
+            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';}
+          }
+        }
       } else {
         return {status:'blocked',message:'No safe native submission path'};
       }

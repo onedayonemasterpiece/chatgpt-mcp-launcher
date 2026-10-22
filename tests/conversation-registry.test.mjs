@@ -289,3 +289,18 @@ test('continue is refused while the agent in that chat is working or a prompt is
   assert.equal(b.status,'queued','allowed once the agent reported done');
   assert.equal((await q.enqueue({action:'start',prompt:'other work'})).status,'queued','new chats are never held back');
 });
+
+test('"not verified" with our prompt still in the composer is reported as not sent, so fallback applies',async t=>{
+  const {q}=await setup(t);
+  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'next step'});
+  await q.claim('desktop');
+  const r=await q.report('desktop',{job_id:a.id,status:'needs_review',message:'Submitted via Enter, but delivery was not verified',
+    page_state:{composer_text:'our_prompt',composer:'present'}});
+  assert.equal(r.status,'blocked');
+  assert.match(r.message,/still in the composer/);
+  assert.ok(r.fallback_job_id,'a continue goes on in a new chat');
+  const b=await q.enqueue({action:'start',prompt:'other'});
+  await q.claim('desktop'); await q.claim('desktop');
+  const s=await q.report('desktop',{job_id:b.id,status:'needs_review',page_state:{composer_text:'empty'}});
+  assert.equal(s.status,'needs_review','an empty composer may mean it was sent: stays uncertain');
+});
