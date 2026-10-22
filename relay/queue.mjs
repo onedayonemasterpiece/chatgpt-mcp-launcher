@@ -26,7 +26,9 @@ export function validChatUrl(value) {
   } catch { return false; }
 }
 
-const MODEL_STATES = ['started','progress','done','failed'];
+// blocked: the agent stopped because it needs a decision (summary says which, from whom).
+const MODEL_STATES = ['started','progress','done','failed','blocked'];
+const MODEL_FINAL = ['done','failed','blocked'];
 // Statuses that always produce a job_update event for subscribers.
 const NOTIFY_STATUSES = ['blocked','failed','needs_review','expired','closed'];
 const MAX_SUBSCRIPTION_MS = 86_400_000;
@@ -41,7 +43,7 @@ export const APP_NAME = 'Chatgpt task lancher';
 export function callbackFooter(jobId) {
   // One short line; the extension then mentions the app itself (job.mention).
   return ' (Служебное: сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
-    ' status=started, в конце status=done и summary.)';
+    ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
 
 // One plain instruction per state, so a calling agent always knows what to do next.
@@ -53,6 +55,8 @@ function nextStep(job) {
     case 'expired':
       return 'Chrome did not pick this job up within 15 minutes, so nothing was sent. Check chatgpt_device_status, then repeat the call with a new request_id.';
     case 'sent':
+      if(job.model_status==='blocked') return 'The agent is BLOCKED and needs a decision: model_summary says which and from whom. '+
+        'Pass that exact question to the owner now (do not just wait), then pause the coordination with that reason.';
       if(job.model_status==='done') return 'ChatGPT finished: model_summary holds its own short result.';
       if(job.model_status==='failed') return 'ChatGPT reported it could not do the task: see model_summary.';
       if(job.model_status==='started') return 'ChatGPT confirmed it started working. Check chatgpt_task_status again in a few minutes for model_status = done.';
@@ -307,7 +311,7 @@ export class FileQueue {
   // Only real reports from the agent count; silence is reported as such.
   #execution(job,now=this.now()) {
     if(job.action!=='start'&&job.action!=='continue') return null;
-    if(job.model_status==='done'||job.model_status==='failed') return job.model_status;
+    if(MODEL_FINAL.includes(job.model_status)) return job.model_status;
     if(job.model_status==='started'||job.model_status==='progress') {
       return now-Date.parse(job.model_last_report_at||job.model_started_at)>this.silenceMs ? 'unconfirmed' : job.model_status;
     }
@@ -317,7 +321,7 @@ export class FileQueue {
   }
   #notifyJob(job,reason) {
     const execution=this.#execution(job);
-    const summary=(job.model_status==='done'||job.model_status==='failed' ? job.model_summary : job.message) || '';
+    const summary=(MODEL_FINAL.includes(job.model_status) ? job.model_summary : job.message) || '';
     this.#emit(JOB_EVENT,[job.id,job.status,job.model_status||'',reason].join('|'),{
       job_id:job.id,request_id:job.request_id||null,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
       chat_url:job.result_chat_url||job.chat_url||null,action:job.action,status:job.status,execution,
@@ -514,13 +518,14 @@ export class FileQueue {
             c.reminders=(c.reminders||0)+1;
             c.last_reminder_at=now;
             const unfinished=this.#state.jobs.filter(j=>(j.action==='start'||j.action==='continue')&&
-              !['done','failed','not_started'].includes(this.#execution(j,now))).slice(-10)
+              !['done','failed','blocked','not_started'].includes(this.#execution(j,now))).slice(-10)
               .map(j=>({job_id:j.id,chat_id:chatIdFromUrl(j.result_chat_url||j.chat_url),execution:this.#execution(j,now)}));
             this.#emit(REMINDER_EVENT,c.id+'|'+c.reminders,{coordination_id:c.id,goal:c.goal,active_agents:active.length,
               min_agents:c.min_agents,idle_minutes:c.idle_minutes,below_minimum_since:iso(start),unfinished,
               // Night of 22 Oct: the work waited for the owner and 21 reminders in a row were noise.
               next_step:'Give useful work to idle agents. If everything is waiting for the owner or another external decision, '+
-                'call chatgpt_coordination_set(pause_minutes, pause_reason) with that reason; reminders resume when the pause ends. '+
+                'first make sure the owner has been asked that exact question, then call chatgpt_coordination_set(pause_minutes, pause_reason) '+
+                'with that reason; reminders resume when the pause ends. '+
                 'If the work is finished or cancelled, call chatgpt_coordination_close.'});
             changed=true;
           }
@@ -533,12 +538,12 @@ export class FileQueue {
   async modelReport(data) {
     return this.#run(async()=>{
       const id=requireString(data.job_id,'job_id',100);
-      if(!MODEL_STATES.includes(data.status))throw Error('status must be started, progress, done or failed');
+      if(!MODEL_STATES.includes(data.status))throw Error('status must be started, progress, done, failed or blocked');
       const job=this.#state.jobs.find(j=>j.id===id&&(j.action==='start'||j.action==='continue'));
       if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
       const now=new Date(this.now()).toISOString();
       // A late "started" or "progress" never undoes a finished report.
-      const finished=job.model_status==='done'||job.model_status==='failed';
+      const finished=MODEL_FINAL.includes(job.model_status);
       const ongoing=data.status==='started'||data.status==='progress';
       if(!(finished&&ongoing)) job.model_status=data.status;
       job.model_last_report_at=now;

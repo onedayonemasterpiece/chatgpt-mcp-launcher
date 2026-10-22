@@ -14,7 +14,7 @@ const STRING={type:'string'};
 const NO_ARGUMENTS={type:'object',properties:{device_id:{type:'string',description:'Leave unset (default desktop).'}},additionalProperties:false};
 export const EVENT_DEFINITIONS=[
   {name:JOB_EVENT,delivery:['webhook'],inputSchema:NO_ARGUMENTS,
-    description:'A launcher job needs attention: ChatGPT reported done/failed, the job was blocked, failed, needs review or expired, '+
+    description:'A launcher job needs attention: ChatGPT reported done/failed/blocked (blocked = the agent needs a decision; pass it to the owner), the job was blocked, failed, needs review or expired, '+
       'its tab was closed, or the agent went silent (execution unconfirmed). Read chatgpt_task_status(job_id) and continue with chatgpt_continue(chat_ref = chat_id).',
     payloadSchema:{type:'object',properties:{job_id:STRING,request_id:{type:['string','null']},chat_id:{type:['string','null']},
       chat_url:{type:['string','null']},action:STRING,status:STRING,execution:{type:['string','null']},

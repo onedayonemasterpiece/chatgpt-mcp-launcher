@@ -250,3 +250,20 @@ test('callback address filter: public OpenAI addresses pass, private and mapped 
   for(const [a,f] of [['127.0.0.1',4],['10.1.2.3',4],['172.16.5.5',4],['192.168.1.1',4],['169.254.1.1',4],['100.64.0.1',4],
     ['::1',6],['fd00::1',6],['fe80::1',6],['::ffff:127.0.0.1',6],['::ffff:104.18.38.184',6]]) assert.equal(isPublic(a,f),false,a);
 });
+
+test('an agent that needs a decision reports blocked: dot is told to pass the exact question to the owner',async t=>{
+  const {q,sent,sender}=harness(await tempFile(t));
+  await subscribeTo(q,sender,JOB_EVENT);
+  const job=await q.enqueue({action:'start',prompt:'task'});
+  const claimed=await q.claim('desktop');
+  assert.match(claimed.prompt,/status=blocked/);
+  await q.report('desktop',{job_id:job.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:job.id,status:'blocked',summary:'Need the owner to approve resetting the Dataset version'});
+  await q.modelReport({job_id:job.id,status:'progress'}); // cannot undo blocked
+  await flush(q,sender);
+  const st=q.status(job.id);
+  assert.equal(st.execution,'blocked');
+  assert.match(st.next_step,/owner now/);
+  assert.equal(sent.length,1);
+  assert.deepEqual([sent[0].data.execution,sent[0].data.summary],['blocked','Need the owner to approve resetting the Dataset version']);
+});

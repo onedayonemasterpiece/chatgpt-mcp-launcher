@@ -180,7 +180,7 @@ test('ChatGPT confirms through MCP: started resolves uncertainty, done carries t
   const task=await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'});
   const claimed=await q.claim('desktop');
   assert.ok(claimed.prompt.includes('job_id='+task.id));
-  assert.ok(!claimed.prompt.includes('\n')&&claimed.prompt.length<'ping'.length+200,'one short line');
+  assert.ok(!claimed.prompt.includes('\n')&&claimed.prompt.length<'ping'.length+260,'one short line');
   assert.equal(claimed.mention,'Chatgpt task lancher','the extension mentions the app itself');
   assert.equal((await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'})).id,task.id,'footer does not break idempotency');
   await q.report('desktop',{job_id:task.id,status:'needs_review',message:'not verified'});
