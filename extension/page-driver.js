@@ -288,7 +288,13 @@
     const buttons=scope ? [...scope.querySelectorAll('button')].filter(visible).slice(0,12).map(b=>({
       testid:(b.getAttribute('data-testid')||'').slice(0,60),aria:(b.getAttribute('aria-label')||'').slice(0,60),
       id:(b.id||'').slice(0,60),disabled:!!b.disabled})) : [];
-    return {counts,composer_buttons:buttons};
+    // Where does the conversation live? Interface attribute names only.
+    const all=[...document.querySelectorAll('*')];
+    const testids=[...new Set(all.map(e=>e.getAttribute('data-testid')).filter(Boolean))].slice(0,80).map(t=>t.slice(0,60));
+    const layout={elements:all.length,main:document.querySelectorAll('main').length,iframes:document.querySelectorAll('iframe').length,
+      shadow_roots:all.filter(e=>e.shadowRoot).length,role_article:document.querySelectorAll('[role="article"]').length,
+      role_log:document.querySelectorAll('[role="log"]').length,prose:document.querySelectorAll('.prose').length};
+    return {counts,composer_buttons:buttons,testids,layout};
   }
   async function run(job) {
     const result=await runSteps(job);

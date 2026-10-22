@@ -101,7 +101,11 @@ function domProbe(raw) {
   const str=v=>typeof v==='string'?v.slice(0,60):'';
   const buttons=Array.isArray(raw.composer_buttons)?raw.composer_buttons.slice(0,12).map(b=>({testid:str(b?.testid),aria:str(b?.aria),
     id:str(b?.id),disabled:b?.disabled===true})):[];
-  return {counts,composer_buttons:buttons};
+  const testids=Array.isArray(raw.testids)?raw.testids.slice(0,80).map(str):[];
+  const layout={};
+  for(const k of ['elements','main','iframes','shadow_roots','role_article','role_log','prose'])
+    layout[k]=Number.isInteger(raw.layout?.[k])?raw.layout[k]:null;
+  return {counts,composer_buttons:buttons,testids,layout};
 }
 
 function requireString(value, name, maxLen = 256) {
