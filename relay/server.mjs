@@ -74,8 +74,8 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{reason:{type:'string',maxLength:300}},additionalProperties:false},
   },
   {
-    name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin; during long work you may send "progress" with a short note; at the end "done" with a short summary (or "failed" with the reason). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
-    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','progress','done','failed']},summary:{type:'string',maxLength:20000,description:'Short progress note, result (done) or reason (failed).'}},required:['job_id','status'],additionalProperties:false},
+    name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin; during long work you may send "progress" with a short note; at the end "done" with a short summary, "failed" with the reason, or "blocked" when you cannot go on without a decision by someone else (say exactly which decision and from whom). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','progress','done','failed','blocked']},summary:{type:'string',maxLength:20000,description:'Short progress note, result (done), reason (failed), or for blocked: exactly which decision is needed and from whom.'}},required:['job_id','status'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Diagnostics: whether the owner\'s Chrome is online and accepting commands, and which launcher version it runs. Use when jobs stay queued.',
