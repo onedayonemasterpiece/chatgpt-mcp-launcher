@@ -288,6 +288,17 @@ export class FileQueue {
         }
       }
       this.#expire(this.now());
+      // Whether the agent is still working is known from its own reports, not
+      // from the ChatGPT page (its markup changes and cannot be relied on).
+      if(action==='continue') {
+        const same=[...this.#state.jobs].reverse().filter(j=>(j.action==='start'||j.action==='continue')&&(j.result_chat_url||j.chat_url)===target);
+        const pending=same.find(j=>j.status==='queued'||j.status==='claimed');
+        if(pending) throw Error('A prompt to this chat is already on its way (job '+pending.id+'). Wait for its result instead of sending another.');
+        const busy=same.find(j=>['started','progress'].includes(this.#execution(j)));
+        if(busy) throw Error('The agent in this chat is still working (job '+busy.id+', '+this.#execution(busy)+'). '+
+          'Wait for its job_update with done, failed or blocked: sending now would land in the middle of its answer. '+
+          'If it goes silent it becomes unconfirmed and continuing is allowed again.');
+      }
       if(this.#state.jobs.length>=MAX_JOBS) {
         const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status));
         if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');

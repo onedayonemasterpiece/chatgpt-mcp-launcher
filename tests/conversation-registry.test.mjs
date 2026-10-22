@@ -275,3 +275,17 @@ test('page_state from Chrome is reduced to known plain fields',async t=>{
   assert.deepEqual(r.page_state,{url_kind:'conversation',composer:'present',composer_text:'our_prompt',answering:true,
     connection_lost:true,user_messages:3,assistant_messages:2});
 });
+
+test('continue is refused while the agent in that chat is working or a prompt is on its way',async t=>{
+  const {q}=await setup(t);
+  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'first'});
+  await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,prompt:'second'}),/already on its way/);
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:a.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:a.id,status:'started'});
+  await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,prompt:'second'}),/still working/);
+  await q.modelReport({job_id:a.id,status:'done',summary:'ok'});
+  const b=await q.enqueue({action:'continue',chat_ref:ID,prompt:'second'});
+  assert.equal(b.status,'queued','allowed once the agent reported done');
+  assert.equal((await q.enqueue({action:'start',prompt:'other work'})).status,'queued','new chats are never held back');
+});

@@ -45,7 +45,7 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
   },
   {
-    name:'chatgpt_read_reply',description:'Fallback when ChatGPT did not report back via model_status: get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
+    name:'chatgpt_read_reply',description:'Unreliable fallback (ChatGPT page markup often cannot be read; prefer model_status/model_summary): get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {

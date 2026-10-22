@@ -417,7 +417,8 @@
     try {probe=domProbe();} catch {}
     return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,dom_probe:probe,
       last_user_text:asked ? asked.slice(0,2000) : null,
-      message:!text ? 'No ChatGPT reply in this conversation yet' :
+      message:!text ? (document.querySelectorAll('[data-message-author-role]').length ? 'No ChatGPT reply in this conversation yet' :
+        'The conversation text is not readable on this page (ChatGPT markup); rely on model_status/model_summary from chatgpt_report') :
         busy ? 'ChatGPT is still writing this reply; read again later' : 'Last ChatGPT reply read'};
   }
   globalThis.chatGPTLauncherRun = run;
