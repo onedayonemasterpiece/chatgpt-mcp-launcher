@@ -347,8 +347,9 @@ export class FileQueue {
   async subscribe(params,sender) {
     const {name,arguments:args={},delivery,ttlMs}=params||{};
     if(!EVENT_DEFINITIONS.some(e=>e.name===name)) throw new DeliveryError('unknown_event');
-    if(args && typeof args==='object' && Object.keys(args).length) throw new DeliveryError('unexpected_arguments');
-    if(delivery?.mode!=='webhook'||typeof delivery.url!=='string') throw new DeliveryError('invalid_url');
+    const extra=args&&typeof args==='object'?Object.keys(args).filter(k=>!(k==='device_id'&&args[k]==='desktop')):[];
+    if(extra.length) throw new DeliveryError('unexpected_arguments');
+    if((delivery?.mode??'webhook')!=='webhook'||typeof delivery?.url!=='string') throw new DeliveryError('invalid_url');
     if(!validSecret(delivery.secret)) throw new DeliveryError('invalid_secret');
     if(ttlMs!==undefined&&ttlMs!==null&&!(Number.isInteger(ttlMs)&&ttlMs>0)) throw new DeliveryError('invalid_ttl');
     const id=subscriptionId(name,delivery.url);
@@ -413,6 +414,8 @@ export class FileQueue {
       if(status===410) sub.state='gone';
       Object.assign(sub,{last_delivery_at:now,last_status:status,last_error:reason});
       await this.#save();
+      console.log(JSON.stringify({event:'mcp_event_delivery',event_id:item.event_id,name:item.name,
+        subscription_id:sub.id,attempt:item.attempts,status,reason,result:item.state}));
     });
     return true;
   }
