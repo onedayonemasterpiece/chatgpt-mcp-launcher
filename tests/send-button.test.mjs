@@ -6,7 +6,7 @@ import {runInNewContext} from 'node:vm';
 const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),'utf8');
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
-                  transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t}={}) {
+                  transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
@@ -32,7 +32,13 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    dispatchEvent:event=>{
      if(event.type==='keydown'&&event.key==='Enter'){state.enters++;if(enterDelivers)delivered();}
      if(event.type==='keydown'&&event.key===' ')state.spaces++;
-     if(event.type==='paste'){state.pastes++;editor.innerText+=event.clipboardData.getData('text/plain');return false;}
+     if(event.type==='paste'){
+       state.pastes++;
+       const text=event.clipboardData.getData('text/plain');
+       // pasteAtStart: the editor ignored our caret and pasted before the prompt.
+       editor.innerText=pasteAtStart?text+editor.innerText:editor.innerText+text;
+       return false;
+     }
      return true;
    }};
  const document={
@@ -241,4 +247,22 @@ test('someone else\'s draft is still never touched',async()=>{
  const result=await f.run({action:'continue',prompt:'Next task: review the dataset',own_text:'Next task: review the dataset',effort:'auto'});
  assert.equal(result.status,'blocked');
  assert.equal(f.editor.innerText,'my own notes');
+});
+
+test('a mention pasted before the prompt is undone and the prompt alone is sent once',async()=>{
+ const f=fixture({pasteAtStart:true});
+ const result=await f.run({action:'start',prompt:'Review the dataset',effort:'auto',mention:'Chatgpt task lancher'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.match(result.message,/App mention skipped/);
+ assert.equal(f.state.deletes,1);
+ assert.equal(f.state.clicks,1);
+});
+
+test('a stuck earlier attempt with the mention in front is recognised as our own and resent',async()=>{
+ const f=fixture({href:'https://chatgpt.com/c/abcd1234',
+   draft:'\n@Chatgpt task lancherReview the dataset (Служебное: old job)'});
+ const result=await f.run({action:'continue',prompt:'Review the dataset (Служебное: new job)',
+   own_text:'Review the dataset',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.clicks,1);
 });

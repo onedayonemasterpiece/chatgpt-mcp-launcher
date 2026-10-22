@@ -186,6 +186,10 @@
     // "@App" as a separate line, wait for ChatGPT's app picker, then a space
     // with the caret at the end picks the app for this message.
     await sleep(2000);
+    // The editor syncs the caret asynchronously (link chips can move it), so
+    // place it, let the editor take it, and place it again before pasting.
+    caretToEnd(el);
+    await sleep(500);
     caretToEnd(el);
     const data=new DataTransfer();
     data.setData('text/plain','\n@'+name);
@@ -227,7 +231,8 @@
       // Our own earlier, unsent attempt with the same prompt may be lying here:
       // replace it. Anybody else's draft is never touched.
       const own=typeof job.own_text==='string' ? core(job.own_text).slice(0,200) : '';
-      if (own.length<8 || !core(draftText(input)).startsWith(own)) {
+      // "includes": an earlier attempt may have the app mention in front of the prompt.
+      if (own.length<8 || !core(draftText(input)).includes(own)) {
         return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
       }
       if (!clearComposer(input)) return {status:'blocked',message:'Could not clear our own earlier unsent prompt'};
@@ -242,7 +247,18 @@
     const ready=await waitForComposer();
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     if (!insertPrompt(ready,job.prompt)) return {status:'blocked',message:'Could not enter prompt'};
-    if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) await addMention(ready,job.mention);
+    let mentionNote='';
+    if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) {
+      await addMention(ready,job.mention);
+      // A launch matters more than the mention: if it landed anywhere but after
+      // the prompt, start over with the prompt alone (live job, 22 Oct 07:42 UTC).
+      if (!core(draftText(ready)).startsWith(core(job.prompt))) {
+        if (!clearComposer(ready) || !insertPrompt(ready,job.prompt)) {
+          return {status:'blocked',message:'The app mention landed in the wrong place and the prompt could not be re-entered; draft left for manual review'};
+        }
+        mentionNote=' App mention skipped (it landed in the wrong place).';
+      }
+    }
     const submit=await waitForSend(ready,job.prompt);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
     let method;
@@ -275,15 +291,15 @@
       stable=url && url===seen ? stable+1 : 0;
       seen=url;
       if(job.action==='start' && url && stable>=5) {
-        return {status:'sent',chat_url:url,message:`New chat created via ${method}.`+effortNote};
+        return {status:'sent',chat_url:url,message:`New chat created via ${method}.`+effortNote+mentionNote};
       }
       if(job.action==='continue' && isConversationUrl(window.location.href)) {
         const now=composer();
-        if (now && !draftText(now).trim()) return {status:'sent',chat_url:chatUrl(),message:`Composer cleared after ${method}.`+effortNote};
+        if (now && !draftText(now).trim()) return {status:'sent',chat_url:chatUrl(),message:`Composer cleared after ${method}.`+effortNote+mentionNote};
       }
     }
     return {status:'needs_review',chat_url:chatUrl(),
-      message:`Submitted via ${method}, but delivery was not verified (previous URL: ${before}). Do not retry automatically.`+effortNote};
+      message:`Submitted via ${method}, but delivery was not verified (previous URL: ${before}). Do not retry automatically.`+effortNote+mentionNote};
   }
   function lastReply() {
     const replies=[...document.querySelectorAll('[data-message-author-role="assistant"]')];
