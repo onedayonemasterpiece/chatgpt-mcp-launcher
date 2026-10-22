@@ -92,6 +92,18 @@ function pageState(raw) {
     connection_lost:raw.connection_lost===true,user_messages:count(raw.user_messages),assistant_messages:count(raw.assistant_messages)};
 }
 
+const PROBE_KEYS=['author_any','author_assistant','author_user','article','turn_testid','message_id','markdown',
+  'turn_assistant','turn_user','stop_testid','stop_aria','send_testid','send_aria'];
+function domProbe(raw) {
+  if(!raw||typeof raw!=='object') return undefined;
+  const counts={};
+  for(const k of PROBE_KEYS) counts[k]=Number.isInteger(raw.counts?.[k])?raw.counts[k]:null;
+  const str=v=>typeof v==='string'?v.slice(0,60):'';
+  const buttons=Array.isArray(raw.composer_buttons)?raw.composer_buttons.slice(0,12).map(b=>({testid:str(b?.testid),aria:str(b?.aria),
+    id:str(b?.id),disabled:b?.disabled===true})):[];
+  return {counts,composer_buttons:buttons};
+}
+
 function requireString(value, name, maxLen = 256) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > maxLen) {
     throw new Error(`${name} must be a nonempty string <= ${maxLen} chars`);
@@ -679,6 +691,7 @@ export class FileQueue {
       if(url)this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
       job.page_state=pageState(data.page_state);
+      job.dom_probe=domProbe(data.dom_probe);
       if(job.action==='read') {
         job.reply_text=typeof data.reply_text==='string'?data.reply_text.slice(0,MAX_REPLY):null;
         job.reply_generating=data.reply_generating===true;

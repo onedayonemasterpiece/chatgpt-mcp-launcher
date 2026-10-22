@@ -267,10 +267,33 @@
       assistant_messages:document.querySelectorAll('[data-message-author-role="assistant"]').length,
     };
   }
+  // Evidence about the live ChatGPT markup: how many elements match each
+  // candidate selector, and the identity attributes of the composer's buttons.
+  // Counts and UI attribute values only, never message text.
+  const PROBE_SELECTORS={
+    author_any:'[data-message-author-role]',author_assistant:'[data-message-author-role="assistant"]',
+    author_user:'[data-message-author-role="user"]',article:'article',turn_testid:'[data-testid^="conversation-turn"]',
+    message_id:'[data-message-id]',markdown:'.markdown',turn_assistant:'[data-turn="assistant"]',turn_user:'[data-turn="user"]',
+    stop_testid:'button[data-testid="stop-button"]',stop_aria:'button[aria-label*="Stop" i],button[aria-label*="Останов" i]',
+    send_testid:'button[data-testid="send-button"],button[data-testid="composer-submit-button"],#composer-submit-button',
+    send_aria:'button[aria-label*="Send" i],button[aria-label*="Отправ" i]',
+  };
+  function domProbe() {
+    const counts={};
+    for(const [key,selector] of Object.entries(PROBE_SELECTORS)) {
+      try {counts[key]=document.querySelectorAll(selector).length;} catch {counts[key]=-1;}
+    }
+    const el=composer();
+    const scope=el?.closest('form') || el?.parentElement?.parentElement?.parentElement || null;
+    const buttons=scope ? [...scope.querySelectorAll('button')].filter(visible).slice(0,12).map(b=>({
+      testid:(b.getAttribute('data-testid')||'').slice(0,60),aria:(b.getAttribute('aria-label')||'').slice(0,60),
+      id:(b.id||'').slice(0,60),disabled:!!b.disabled})) : [];
+    return {counts,composer_buttons:buttons};
+  }
   async function run(job) {
     const result=await runSteps(job);
     if (result && (result.status==='blocked'||result.status==='needs_review')) {
-      try {result.page_state=pageState(job);} catch {}
+      try {result.page_state=pageState(job);result.dom_probe=domProbe();} catch {}
     }
     return result;
   }
@@ -384,7 +407,9 @@
     // The last user message shows whether a prompt sent earlier really arrived.
     const users=[...document.querySelectorAll('[data-message-author-role="user"]')];
     const asked=(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
-    return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,
+    let probe=null;
+    try {probe=domProbe();} catch {}
+    return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,dom_probe:probe,
       last_user_text:asked ? asked.slice(0,2000) : null,
       message:!text ? 'No ChatGPT reply in this conversation yet' :
         busy ? 'ChatGPT is still writing this reply; read again later' : 'Last ChatGPT reply read'};
