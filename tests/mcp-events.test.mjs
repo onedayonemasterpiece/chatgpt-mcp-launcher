@@ -141,7 +141,7 @@ test('a callback that does not echo the challenge is refused',async t=>{
 test('one fact gives one event; blocked/needs_review/closed notify; 410 ends the subscription',async t=>{
   const {q,sent,sender}=harness(await tempFile(t),{statuses:[200,200,410]});
   await subscribeTo(q,sender,JOB_EVENT);
-  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'next'});
+  const a=await q.enqueue({action:'start',prompt:'next'});
   await q.claim('desktop');
   await q.report('desktop',{job_id:a.id,status:'blocked',message:'An unsent draft already exists'});
   await q.report('desktop',{job_id:a.id,status:'blocked'}); // repeated report: same fact
