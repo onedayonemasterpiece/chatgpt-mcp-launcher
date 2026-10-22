@@ -71,6 +71,8 @@ function nextStep(job) {
       return job.reply_text ? 'reply_text holds the last ChatGPT reply.' :
         'No reply yet. If a prompt was just sent, call chatgpt_read_reply again in about 30 seconds.';
     case 'blocked':
+      if(job.fallback_job_id) return 'Nothing was sent in this chat, so the launcher already started the same prompt in a NEW chat: follow chatgpt_task_status('+
+        job.fallback_job_id+'); its chat_id is this line of work from now on. Do not retry here.';
       return 'Nothing was sent. Read message for the reason; once it is resolved, chatgpt_retry(job_id) sends the exact same prompt again into the same chat.';
     case 'needs_review':
       return 'The prompt may or may not have been sent. Do NOT resend blindly: call chatgpt_read_reply for this chat and compare last_user_text with your prompt. '+
@@ -289,6 +291,7 @@ export class FileQueue {
         'Only a job that sent nothing (blocked, expired, failed) can be retried; this one is '+original.status);
     }
     if(original.model_status) throw Error('ChatGPT already confirmed this prompt; nothing to retry');
+    if(original.fallback_job_id) throw Error('Already restarted in a new chat as job '+original.fallback_job_id+'; follow that job');
     const job=await this.enqueue({action:original.action,prompt:original.prompt,effort:original.effort,
       device_id:original.device_id,slack_thread_url:original.slack_thread_url||undefined,
       ...(original.chat_url?{chat_url:original.chat_url}:{}),
@@ -342,7 +345,8 @@ export class FileQueue {
     const execution=this.#execution(job);
     const summary=(MODEL_FINAL.includes(job.model_status) ? job.model_summary : job.message) || '';
     this.#emit(JOB_EVENT,[job.id,job.status,job.model_status||'',reason].join('|'),{
-      job_id:job.id,request_id:job.request_id||null,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
+      job_id:job.id,request_id:job.request_id||null,fallback_job_id:job.fallback_job_id||null,fallback_of:job.fallback_of||null,
+      chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
       chat_url:job.result_chat_url||job.chat_url||null,action:job.action,status:job.status,execution,
       summary:String(summary).slice(0,500)});
   }
@@ -669,6 +673,16 @@ export class FileQueue {
         job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
       job.reported_at=new Date(this.now()).toISOString();
+      // A continue that could not be delivered must not lose the line of work:
+      // start the same prompt in a new chat right away (owner decision, 22 Oct).
+      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id) {
+        const fallback={id:randomUUID(),action:'start',effort:job.effort,device_id:job.device_id,chat_url:null,
+          prompt:'(Продолжение работы из чата '+job.chat_url+': продолжить там не удалось, поэтому задача запущена в новом окне.)\n\n'+job.prompt,
+          slack_thread_url:job.slack_thread_url||null,request_id:'fallback-'+job.id,status:'queued',
+          created_at:new Date(this.now()).toISOString(),fallback_of:job.id};
+        this.#state.jobs.push(fallback);
+        job.fallback_job_id=fallback.id;
+      }
       if(NOTIFY_STATUSES.includes(job.status)) this.#notifyJob(job,'chrome');
       await this.#save();
       return this.#public(job);

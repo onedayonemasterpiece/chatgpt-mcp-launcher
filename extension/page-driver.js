@@ -105,7 +105,7 @@
     for(let i=0;i<10;i++) {
       await sleep(100);
       const current=composer();
-      if(current && core(draftText(current))===core(prompt)) return {ok:true};
+      if(current && samePrompt(draftText(current),prompt)) return {ok:true};
     }
     return failure(command===false ? 'editing command refused or text differs' : 'text did not settle');
   }
@@ -160,7 +160,7 @@
       const current=composer();
       // The app mention added after the prompt may render as a chip, so only
       // the prompt itself must still be there, unchanged, at the start.
-      if(current && !core(draftText(current)).startsWith(core(prompt))) {
+      if(current && !promptFirst(draftText(current),prompt)) {
         return {blocked:'Composer contents changed before submission'};
       }
       if(current) {
@@ -181,6 +181,18 @@
   // dashes and arrows, but the words of the prompt stay the same.
   function core(s) {
     return (s || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  }
+  // ChatGPT turns links into chips (Slack, GitHub icons), so the composer text
+  // is not character-identical to the prompt. Ours if it starts like the
+  // prompt, holds its end (the line with our job_id) and has a similar size.
+  function samePrompt(text,prompt) {
+    const t=core(text), p=core(prompt);
+    return t===p || (t.startsWith(p.slice(0,30)) && t.endsWith(p.slice(-40)) && t.length>=p.length*0.8 && t.length<=p.length*1.3);
+  }
+  // The same, but something (the app mention) may follow the prompt.
+  function promptFirst(text,prompt) {
+    const t=core(text), p=core(prompt);
+    return t.startsWith(p) || (t.startsWith(p.slice(0,30)) && t.includes(p.slice(-40)) && t.length>=p.length*0.8);
   }
   function clearComposer(el) {
     el.focus();
@@ -250,7 +262,7 @@
     if (draftText(input).trim()) {
       // Our own earlier, unsent attempt with the same prompt may be lying here:
       // replace it. Anybody else's draft is never touched.
-      const own=typeof job.own_text==='string' ? core(job.own_text).slice(0,200) : '';
+      const own=typeof job.own_text==='string' ? core(job.own_text).slice(0,30) : '';
       // "includes": an earlier attempt may have the app mention in front of the prompt.
       if (own.length<8 || !core(draftText(input)).includes(own)) {
         return {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'};
@@ -258,8 +270,10 @@
       if (!clearComposer(input)) return {status:'blocked',message:'Could not clear our own earlier unsent prompt'};
     }
     // Never reload or interrupt: if ChatGPT is still answering here, wait for it.
-    for (let i=0;i<360 && replyInProgress();i++) await sleep(500);
-    if (replyInProgress()) return {status:'blocked',message:'ChatGPT was still answering in this conversation after 3 minutes; nothing was sent, try again later'};
+    // A page stuck on "connection lost, waiting for the full answer" never ends:
+    // give up after 90 s; the relay then starts the prompt in a new chat.
+    for (let i=0;i<180 && replyInProgress();i++) await sleep(500);
+    if (replyInProgress()) return {status:'blocked',reason:'answering',message:'ChatGPT was still answering in this conversation after 90 seconds; nothing was sent'};
     // A launch matters more than the effort level: ChatGPT keeps the last
     // selected level, so a picker that cannot be verified never blocks the send.
     const effortResult=await setEffort(job.effort || 'auto');
@@ -273,7 +287,7 @@
       await addMention(ready,job.mention);
       // A launch matters more than the mention: if it landed anywhere but after
       // the prompt, start over with the prompt alone (live job, 22 Oct 07:42 UTC).
-      if (!core(draftText(ready)).startsWith(core(job.prompt))) {
+      if (!promptFirst(draftText(ready),job.prompt)) {
         if (!clearComposer(ready) || !(await insertPrompt(ready,job.prompt)).ok) {
           return {status:'blocked',message:'The app mention landed in the wrong place and the prompt could not be re-entered; draft left for manual review'};
         }

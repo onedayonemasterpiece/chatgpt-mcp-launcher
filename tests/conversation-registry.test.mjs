@@ -226,13 +226,13 @@ test('close job has no prompt and can only report closed or blocked',async t=>{
 
 test('retry re-sends the exact prompt only when nothing was sent, once',async t=>{
   const {q}=await setup(t);
-  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'Exact long task text'});
+  const a=await q.enqueue({action:'start',prompt:'Exact long task text'});
   await q.claim('desktop');
   await q.report('desktop',{job_id:a.id,status:'blocked',message:'Composer contents changed before submission'});
   assert.match(q.status(a.id).next_step,/chatgpt_retry/);
   const r=await q.retry(a.id);
   assert.equal(r.retry_of,a.id);
-  assert.equal(r.chat_url,URL);
+  assert.equal(r.action,'start');
   assert.equal((await q.retry(a.id)).id,r.id,'a repeated retry call does not create a second job');
   const claimed=await q.claim('desktop');
   assert.equal(claimed.own_text,'Exact long task text','the same text lets Chrome replace its own draft');
@@ -244,4 +244,24 @@ test('retry re-sends the exact prompt only when nothing was sent, once',async t=
   await q.claim('desktop');
   await q.report('desktop',{job_id:c.id,status:'sent',chat_url:URL});
   await assert.rejects(q.retry(c.id),/sent nothing/);
+});
+
+test('a continue that could not be delivered restarts the same prompt in a new chat at once',async t=>{
+  const {q}=await setup(t);
+  const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'Next step for Kvarts'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:a.id,status:'blocked',message:'ChatGPT was still answering after 90 seconds'});
+  const st=q.status(a.id);
+  assert.ok(st.fallback_job_id);
+  assert.match(st.next_step,/NEW chat/);
+  await assert.rejects(q.retry(a.id),/Already restarted/);
+  const next=await q.claim('desktop');
+  assert.equal(next.id,st.fallback_job_id);
+  assert.equal(next.action,'start');
+  assert.match(next.prompt,/Next step for Kvarts/);
+  assert.match(next.prompt,/Продолжение работы из чата https:\/\/chatgpt.com\/c\//);
+  await q.report('desktop',{job_id:a.id,status:'blocked'}); // repeated report: no second fallback
+  assert.equal(q.status(a.id).fallback_job_id,st.fallback_job_id);
+  await q.report('desktop',{job_id:next.id,status:'blocked'}); // a failed fallback start does not cascade
+  assert.equal(q.status(next.id).fallback_job_id,undefined);
 });
