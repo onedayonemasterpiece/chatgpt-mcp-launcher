@@ -543,8 +543,11 @@ export class FileQueue {
       if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
       const now=new Date(this.now()).toISOString();
       // A late "started" or "progress" never undoes a finished report.
-      const finished=MODEL_FINAL.includes(job.model_status);
+      // done/failed are final; blocked is not: once the decision is given (in
+      // the agent's own chat), the agent goes on and reports started/progress.
+      const finished=job.model_status==='done'||job.model_status==='failed';
       const ongoing=data.status==='started'||data.status==='progress';
+      if(job.model_status==='blocked'&&ongoing) job.model_episode=(job.model_episode||0)+1;
       if(!(finished&&ongoing)) job.model_status=data.status;
       job.model_last_report_at=now;
       if(data.status==='started') job.model_started_at||=now;
@@ -558,7 +561,9 @@ export class FileQueue {
         Object.assign(job,{status:'sent',timed_out:false,reported_at:job.reported_at||now,
           message:'Delivery confirmed by ChatGPT itself via chatgpt_report'});
       }
-      if(!ongoing) this.#notifyJob(job,'model');
+      // One event per outcome per episode: a repeated identical report is not news,
+      // a second blocked after resuming is.
+      if(!ongoing) this.#notifyJob(job,'model|'+(job.model_episode||0));
       await this.#save();
       return {ok:true,job_id:id,model_status:job.model_status};
     });
