@@ -71,7 +71,7 @@ function nextStep(job) {
       return job.reply_text ? 'reply_text holds the last ChatGPT reply.' :
         'No reply yet. If a prompt was just sent, call chatgpt_read_reply again in about 30 seconds.';
     case 'blocked':
-      return 'Nothing was sent. Read message for the reason; fix it or report it to the owner before trying again with a new request_id.';
+      return 'Nothing was sent. Read message for the reason; once it is resolved, chatgpt_retry(job_id) sends the exact same prompt again into the same chat.';
     case 'needs_review':
       return 'The prompt may or may not have been sent. Do NOT resend blindly: call chatgpt_read_reply for this chat and compare last_user_text with your prompt. '+
         'If it is there, it was sent; if not, send it with chatgpt_continue and a new request_id.';
@@ -275,6 +275,25 @@ export class FileQueue {
       await this.#save();
       return this.#public(job);
     });
+  }
+  // Re-sends the exact stored prompt of a job that certainly sent nothing, into
+  // the same chat. The caller never sees the prompt, so it cannot retype it;
+  // the same text also lets Chrome recognise and replace its own unsent draft.
+  async retry(jobId,requestId) {
+    const original=this.#state.jobs.find(j=>j.id===jobId);
+    if(!original) throw Error('Unknown job_id');
+    if(original.action!=='start'&&original.action!=='continue') throw Error('Only start and continue jobs can be retried');
+    if(!['blocked','expired','failed'].includes(original.status)) {
+      throw Error(original.status==='needs_review' ?
+        'This prompt may already have been sent: check with chatgpt_read_reply (last_user_text) instead of retrying' :
+        'Only a job that sent nothing (blocked, expired, failed) can be retried; this one is '+original.status);
+    }
+    if(original.model_status) throw Error('ChatGPT already confirmed this prompt; nothing to retry');
+    const job=await this.enqueue({action:original.action,prompt:original.prompt,effort:original.effort,
+      device_id:original.device_id,slack_thread_url:original.slack_thread_url||undefined,
+      ...(original.chat_url?{chat_url:original.chat_url}:{}),
+      request_id:requestId||('retry-'+original.id)});
+    return {...job,retry_of:original.id};
   }
   resolveChat(reference,deviceId='desktop') {
     const jobs=this.#state.jobs.filter(j=>j.device_id===deviceId);

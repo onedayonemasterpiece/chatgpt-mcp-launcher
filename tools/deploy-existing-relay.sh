@@ -80,7 +80,7 @@ const denied=await check('tools/list',10,false);
 if(denied.status!==401)throw new Error('Unauthorized MCP endpoint accessible');
 const listed=await check('tools/list',11,true);
 const names=listed.body?.result?.tools?.map(x=>x.name)||[];
-for(const name of ['chatgpt_start','chatgpt_continue','chatgpt_open','chatgpt_read_reply','chatgpt_list_chats','chatgpt_close_chat','chatgpt_coordination_set','chatgpt_coordination_close','chatgpt_device_status','chatgpt_task_status'])
+for(const name of ['chatgpt_start','chatgpt_continue','chatgpt_open','chatgpt_read_reply','chatgpt_list_chats','chatgpt_retry','chatgpt_close_chat','chatgpt_coordination_set','chatgpt_coordination_close','chatgpt_device_status','chatgpt_task_status'])
   if(!names.includes(name))throw new Error('Missing live MCP tool '+name);
 console.log('PASS: protected MCP tool discovery; '+names.length+' tools. No model output read.');
 JS
