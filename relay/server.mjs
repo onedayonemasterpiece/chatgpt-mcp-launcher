@@ -15,13 +15,13 @@ const INSTRUCTIONS = [
   'Workflow:',
   '1. New conversation: chatgpt_start(prompt). Then call chatgpt_task_status(job_id) every ~20 s until status is no longer queued/claimed. On "sent" keep chat_id: it identifies this conversation from now on.',
   '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id).',
-  '3. Follow-up in the same conversation: chatgpt_continue(chat_ref = chat_id, prompt). Never use chatgpt_start for a follow-up.',
+  '3. Follow-up: chatgpt_continue(chat_ref = chat_id, prompt). The launcher permits at most FIVE delivered continuations per real chat_id; at count 5, or whenever an old count is unknown/missing/null, this call automatically creates ONE new ChatGPT chat with context. Follow the NEW chat_id in chatgpt_task_status. A new start begins at count 0.',
   '4. Lost a chat_id: chatgpt_list_chats.',
   '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
   'Events: subscribe to chatgpt_launcher.job_update to be woken when a job finishes, is blocked/failed/needs review/expired, its tab is closed, or the agent goes silent. execution separates the work from delivery: awaiting_confirmation, started, progress, done, failed, unconfirmed (no report for too long: unknown, not done).',
   'Coordination (optional reminder): chatgpt_coordination_set(goal, min_agents, idle_minutes) and subscribe to chatgpt_launcher.coordination_reminder; you are reminded while fewer agents than min_agents report started/progress for longer than idle_minutes. Pause only with a reason and a duration; close it explicitly when the whole work is done or cancelled.',
   'A job that sent nothing (blocked/expired/failed) is repeated with chatgpt_retry(job_id): exact same prompt, same chat.',
-  'Rules: each result has next_step; follow it. Give every start/continue a unique request_id and reuse the same request_id only to repeat a call whose result you did not get. After needs_review, check with chatgpt_read_reply (last_user_text) before resending. Jobs stuck in queued: check chatgpt_device_status (Chrome offline or commands disabled).',
+  'Rules: each result has next_step; follow it. Give every start/continue a unique request_id, reuse it for a lost response. Continuation count changes only once on confirmed delivery, not on queued/blocked attempts. Never continue/handoff an active or uncertain job (needs_review/unconfirmed): first reconcile it, never blind retry. No old tab is automatically closed. Jobs stuck queued: check chatgpt_device_status.',
 ].join('\n');
 const CHAT_REF = {type:'string',description:'Which conversation: the chat_id from chatgpt_task_status or chatgpt_list_chats (preferred), a full https://chatgpt.com/c/... URL, or the job_id that created the chat.'};
 const CHAT_URL = {type:'string',description:'Alternative to chat_ref: full https://chatgpt.com/c/... URL. Pass chat_ref or chat_url, not both.'};
@@ -41,7 +41,7 @@ const TOOL_LIST = [
     inputSchema:{type:'object', properties:PROPS, required:['prompt'], additionalProperties:false},
   },
   {
-    name:'chatgpt_continue', description:'Send a follow-up prompt into an EXISTING conversation (chat_ref = chat_id). Finds the open tab or opens it; no need to call chatgpt_open first. Returns job_id; poll chatgpt_task_status. After needs_review, check with chatgpt_read_reply before resending.',
+    name:'chatgpt_continue', description:'Continue a line of work by chat_id. At most 5 confirmed continuations are delivered to one existing chat. If it already has 5, OR its legacy count is missing/null/unknown, the launcher automatically sends this prompt in a NEW chat (with source link and available original prompt). Poll chatgpt_task_status and switch to the returned NEW chat_id/url; previous_chat_url links the predecessor. Once successor_chat_url is known, continuing the old predecessor is rejected with that successor link, not forked. In-flight/uncertain work blocks handoff; duplicate request_id stays idempotent even after bounded job pruning. Never retry needs_review blindly. No old tab is closed.',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
   },
   {
@@ -49,15 +49,15 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
-    name:'chatgpt_task_status', description:'Status of a job by job_id: queued/claimed = in progress; sent = prompt delivered, then model_status started/done/failed and model_summary as ChatGPT reports back; read = reply_text ready; opened; blocked = nothing sent; expired = Chrome did not pick it up within 15 min, nothing sent; needs_review = may have been sent, check with chatgpt_read_reply before resending; failed. No job stays in progress longer than 15 minutes. Always includes next_step, plus chat_id when known.',
+    name:'chatgpt_task_status', description:'Status by job_id: queued/claimed, sent, read, opened, blocked (nothing sent), expired (never claimed), needs_review (may be sent; reconcile before any repeat/continue), failed. Exposes current chat_id/chat_url, continuation_count (integer 0..5 or null unknown), and for automatic new-chat handoff previous_chat_url plus delivery_action=start; model_status is separate. Never invent a new chat ID; no in-flight job stays claimed over 15 min.',
     inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id returned by start/continue/read_reply/open.'}},required:['job_id'],additionalProperties:false},
   },
   {
-    name:'chatgpt_list_chats',description:'Conversations started or continued through this launcher, newest first, with chat_id and chat_url. Use it to find a chat_id you lost. No message text.',
+    name:'chatgpt_list_chats',description:'Known ChatGPT conversations with chat_id/url, persistent continuation_count (0..5, null for legacy unknown), and previous_chat_url/successor_chat_url when a new chat was created. No message text. Never infer unknown counts from old jobs.',
     inputSchema:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:50,description:'Default 20.'},device_id:COMMON.device_id},additionalProperties:false},
   },
   {
-    name:'chatgpt_retry',description:'Send again the exact prompt of a job that certainly sent nothing (status blocked, expired or failed) into the same chat; you do not need the prompt text. Chrome recognises and replaces its own unsent draft. Refused for needs_review (it may have been sent) and for jobs ChatGPT already confirmed. Returns the new job.',
+    name:'chatgpt_retry',description:'Retry a job proven not sent (blocked/expired/failed) with its stored exact prompt and original chat reference; the five-continuation/legacy rollover policy still applies, so it may open a NEW chat. Refused if unknown needs_review, model-confirmed, or fallback already started; never duplicate a sent task.',
     inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id of the job that sent nothing.'},request_id:COMMON.request_id},required:['job_id'],additionalProperties:false},
   },
   {
