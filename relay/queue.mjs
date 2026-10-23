@@ -110,6 +110,10 @@ function nextStep(job) {
     case 'blocked':
       if(job.fallback_job_id) return 'Nothing was sent in this chat, so the launcher already started the same prompt in a NEW chat: follow chatgpt_task_status('+
         job.fallback_job_id+'); its chat_id is this line of work from now on. Do not retry here.';
+      // Agents stopped the work on the generic advice (live 23 Oct, 20:51-21:05).
+      if(job.proven_unsent) return 'Nothing was sent: the prompt is still in the composer, so a retry cannot duplicate it. '+
+        'Wait about 2 minutes and call chatgpt_retry(job_id). If it is blocked again, give the task to another existing chat '+
+        'with chatgpt_continue and report the failure in the coordination thread. Do not drop the task.';
       return 'Nothing was sent. Read message for the reason; once it is resolved, chatgpt_retry(job_id) sends the exact same prompt again into the same chat.';
     case 'needs_review':
       return 'The prompt may or may not have been sent. Do NOT resend, continue or hand off blindly. '+
@@ -860,7 +864,10 @@ export class FileQueue {
       // unknown (never recast as "nothing sent").
       const ownDraft=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status;
       job.status=ownDraft?'blocked':wrongRolloverAddress?'needs_review':data.status;
-      if(ownDraft) data={...data,message:'Not sent: the prompt is still in the composer. '+(data.message||'')};
+      // Proven unsent: a retry cannot duplicate, so do not tell agents to stop.
+      if(ownDraft) data={...data,message:'Not sent: the prompt is still in the composer. '+
+        String(data.message||'').replace(/\s*Do not retry automatically\./,'')};
+      job.proven_unsent=ownDraft||undefined;
       if(wrongRolloverAddress) data={...data,message:'New chat ID was not verified; reconcile actual delivery before retrying'};
       job.result_chat_url=url;
       if(job.status==='sent') this.#markDelivered(job);
