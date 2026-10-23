@@ -57,7 +57,9 @@ test('MCP opens a slug without sending, lists it and continues it by slug',async
   assert.equal(registry.chats[0].chat_id,ID);
   const continuation=await call('chatgpt_continue',{chat_ref:ID,prompt:'Continue work',request_id:'continue-id'});
   assert.equal(continuation.action,'continue');
-  assert.equal(continuation.chat_url,URL);
+  assert.equal(continuation.delivery_action,'start','open/read alone do not establish a reliable count');
+  assert.equal(continuation.previous_chat_url,URL);
+  assert.equal(continuation.chat_url,null,'real new chat ID arrives only after Chrome sends');
   assert.equal(continuation.effort,'auto');
   const listed=JSON.stringify(await call('chatgpt_list_chats',{}));
   assert.equal(listed.includes('Continue work'),false,'no prompt text in the registry');

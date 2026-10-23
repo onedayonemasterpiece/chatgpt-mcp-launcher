@@ -1,11 +1,11 @@
 {
   "name": "chatgpt-mcp-launcher",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node relay/server.mjs",
-    "test": "node --test tests/relay.test.mjs tests/conversation-registry.test.mjs tests/async-mcp.test.mjs tests/mcp-events.test.mjs tests/background-update.test.mjs tests/background-tab-reuse.test.mjs tests/heartbeat.test.mjs tests/popup.test.mjs tests/runtime-revision.test.mjs tests/public-installer.test.mjs tests/send-button.test.mjs"
+    "test": "node --test tests/relay.test.mjs tests/conversation-registry.test.mjs tests/async-mcp.test.mjs tests/mcp-events.test.mjs tests/background-update.test.mjs tests/background-tab-reuse.test.mjs tests/heartbeat.test.mjs tests/popup.test.mjs tests/runtime-revision.test.mjs tests/public-installer.test.mjs tests/send-button.test.mjs tests/continuation-limit.test.mjs"
   },
   "engines": {
     "node": ">=20"

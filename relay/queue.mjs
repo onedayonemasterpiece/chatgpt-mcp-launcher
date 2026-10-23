@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} from './conversations.mjs';
@@ -12,6 +12,34 @@ const STALE_MS = 15 * 60_000;
 const TERMINAL = ['sent','opened','read','closed','blocked','failed','needs_review','expired'];
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
+const MAX_CONTINUATIONS = 5;
+// Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
+const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
+const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
+function handoffPrefix(url, sourcePrompt, nextPrompt, jobId) {
+  // Chrome validates the FINAL payload, after claim() adds callbackFooter.
+  const budget=MAX_PROMPT-callbackFooter(jobId).length;
+  const intro='(Продолжение работы из чата '+url+'. Launcher открыл НОВОЕ окно вместо дальнейшего продолжения старого. '+
+    'Используй предыдущий чат как контекст; не запускай второй параллельный экземпляр задания.)\n\n';
+  const suffix='Текущее поручение (выполни его без потери деталей):\n';
+  if(intro.length+suffix.length+nextPrompt.length>budget) {
+    throw Error('Handoff plus callbackFooter exceeds 30000 characters; shorten the new prompt before retrying. Nothing was sent.');
+  }
+  let original='';
+  if(typeof sourcePrompt==='string' && sourcePrompt.length) {
+    const heading='Исходный prompt предыдущего чата (контекст):\n';
+    const end='\n\n';
+    const room=budget-intro.length-suffix.length-nextPrompt.length-heading.length-end.length;
+    const note='\n[Остальное — по ссылке выше.]';
+    if(room>0) {
+      // Preserve the entire original prompt whenever it fits. Otherwise keep
+      // as much as possible and give a link to the full prior conversation.
+      const excerpt=sourcePrompt.slice(0,sourcePrompt.length<=room?room:Math.max(0,room-note.length));
+      if(excerpt) original=heading+excerpt+(excerpt.length<sourcePrompt.length?note:'')+end;
+    }
+  }
+  return intro+original+suffix;
+}
 const SHA40 = /^[a-f0-9]{40}$/;
 const UPDATER_STATES = ['current','updated','error','checking','unknown'];
 const asRevision = s => typeof s==='string' && SHA40.test(s) ? s : null;
@@ -55,6 +83,11 @@ function nextStep(job) {
     case 'expired':
       return 'Chrome did not pick this job up within 15 minutes, so nothing was sent. Check chatgpt_device_status, then repeat the call with a new request_id.';
     case 'sent':
+      if(job.delivery_action==='start'&&!job.result_chat_url)
+        return 'A NEW chat was requested and delivery was confirmed, but its real chat_id is not yet known. '+
+          'Wait for the existing browser report; do not resend or continue the old chat.';
+      if(job.delivery_action==='start'&&job.result_chat_url&&job.model_status==='done')
+        return 'Work finished in the NEW conversation. Follow its returned chat_id/chat_url for subsequent prompts; the old window is untouched.';
       if(job.model_status==='blocked') return 'The agent is BLOCKED and needs a decision: model_summary says which and from whom. '+
         'Pass that exact question to the owner now (do not just wait), then pause the coordination with that reason.';
       if(job.model_status==='done') return 'ChatGPT finished: model_summary holds its own short result.';
@@ -75,8 +108,9 @@ function nextStep(job) {
         job.fallback_job_id+'); its chat_id is this line of work from now on. Do not retry here.';
       return 'Nothing was sent. Read message for the reason; once it is resolved, chatgpt_retry(job_id) sends the exact same prompt again into the same chat.';
     case 'needs_review':
-      return 'The prompt may or may not have been sent. Do NOT resend blindly: call chatgpt_read_reply for this chat and compare last_user_text with your prompt. '+
-        'If it is there, it was sent; if not, send it with chatgpt_continue and a new request_id.';
+      return 'The prompt may or may not have been sent. Do NOT resend, continue or hand off blindly. '+
+        'Reconcile the actual delivery first (chatgpt_read_reply/last_user_text when readable, or the existing job report); '+
+        'a new request_id does not erase this uncertainty.';
     default:
       return 'Failed. Read message and report it to the owner.';
   }
@@ -116,7 +150,7 @@ function requireString(value, name, maxLen = 256) {
 }
 
 export class FileQueue {
-  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null };
+  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null, request_receipts: [] };
   #serial = Promise.resolve();
   // silenceMs: no report from the agent for this long after started/progress
   // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
@@ -229,7 +263,8 @@ export class FileQueue {
       if (!Array.isArray(parsed.jobs)) throw new Error('Invalid state');
       this.#state = {...parsed,device_status:parsed.device_status||{},chats:Array.isArray(parsed.chats)?parsed.chats:[],
         subscriptions:Array.isArray(parsed.subscriptions)?parsed.subscriptions:[],
-        outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null};
+        outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null,
+        request_receipts:Array.isArray(parsed.request_receipts)?parsed.request_receipts:[]};
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
       // Earlier releases left such jobs as needs_review; they certainly sent nothing.
@@ -240,7 +275,7 @@ export class FileQueue {
       for(const old of parsed.jobs) {
         const url=canonicalChatUrl(old.result_chat_url);
         if(url && !this.#state.chats.some(c=>c.device_id===old.device_id&&c.chat_url===url))
-          this.#recordChat(url,old.device_id,old.id,old.status);
+          this.#recordChat(url,old.device_id,old.id,'legacy'); // migration must NEVER infer count zero
       }
       for(const [deviceId,item] of Object.entries(this.#state.device_status)) {
         if(Object.hasOwn(this.devices,deviceId) && item && typeof item==='object') {
@@ -291,29 +326,72 @@ export class FileQueue {
             throw Error('Idempotency key belongs to a different operation');
           return this.#public(existing);
         }
+        // Even when an old completed job leaves the 500-job working queue, its
+        // compact receipt survives so a lost response never creates a new send.
+        const receipt=this.#state.request_receipts.find(r=>r.device_id===deviceId&&r.request_id===requestId);
+        if(receipt) {
+          if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt))
+            throw Error('Idempotency key belongs to a different operation');
+          return {...this.#public(receipt.job),archived:true};
+        }
       }
       this.#expire(this.now());
-      // Whether the agent is still working is known from its own reports, not
-      // from the ChatGPT page (its markup changes and cannot be relied on).
+      // Serialized with enqueue/report/modelReport: a pending or uncertain send
+      // reserves the chat until a definite outcome, including across restarts.
       if(action==='continue') {
-        const same=[...this.#state.jobs].reverse().filter(j=>(j.action==='start'||j.action==='continue')&&(j.result_chat_url||j.chat_url)===target);
+        const same=[...this.#state.jobs].reverse().filter(j=>
+          (j.action==='start'||j.action==='continue')&&
+          ((j.result_chat_url||j.chat_url)===target||j.previous_chat_url===target));
         const pending=same.find(j=>j.status==='queued'||j.status==='claimed');
         if(pending) throw Error('A prompt to this chat is already on its way (job '+pending.id+'). Wait for its result instead of sending another.');
-        const busy=same.find(j=>['started','progress'].includes(this.#execution(j)));
-        if(busy) throw Error('The agent in this chat is still working (job '+busy.id+', '+this.#execution(busy)+'). '+
-          'Wait for its job_update with done, failed or blocked: sending now would land in the middle of its answer. '+
-          'If it goes silent it becomes unconfirmed and continuing is allowed again.');
+        const unknown=same.find(j=>j.status==='needs_review'||(j.previous_chat_url===target&&j.status==='sent'&&!j.result_chat_url));
+        if(unknown) throw Error('Delivery or new chat address still needs review (job '+unknown.id+
+          '); reconcile its actual outcome before any further continue or handoff.');
+        const busy=same.find(j=>['started','progress','unconfirmed','awaiting_confirmation','unknown'].includes(this.#execution(j)));
+        if(busy) throw Error('The agent or delivery outcome in this chat is still working/unconfirmed (job '+
+          busy.id+', '+this.#execution(busy)+'). Reconcile before continuing; never launch a duplicate.');
       }
+      const existingChat=this.#state.chats.find(c=>c.chat_url===target&&c.device_id===deviceId);
+      if(action==='continue'&&existingChat?.successor_chat_url) {
+        throw Error('This chat has already been handed off to '+existingChat.successor_chat_url+
+          '. Follow its new chat_id instead of creating a second successor.');
+      }
+      const count=continuationCount(existingChat?.continuation_count);
+      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS);
+      const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
+      const jobId=randomUUID();
+      const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId):null;
+      // Reject before queue admission: this exact payload is what Chrome's
+      // preparePrompt validates, including the callback footer added at claim.
+      if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length>MAX_PROMPT)
+        throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
-        const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status));
+        // Never evict an ambiguous send: losing that receipt could authorize a
+        // second browser send after a restart. The existing bounded queue may
+        // reject new work rather than erase an unresolved delivery.
+        const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status)&&
+          j.status!=='needs_review'&&
+          !(j.status==='sent'&&['started','progress','awaiting_confirmation','unconfirmed','unknown'].includes(this.#execution(j)))&&
+          !(j.previous_chat_url&&j.status==='sent'&&!j.result_chat_url));
         if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
-        this.#state.jobs.splice(removable,1);
+        const [pruned]=this.#state.jobs.splice(removable,1);
+        if(pruned.request_id) {
+          const {prompt:discardPrompt,handoff_prefix:discardPrefix,model_summary:discardSummary,
+            model_progress:discardProgress,...receiptJob}=pruned;
+          this.#state.request_receipts.push({
+            device_id:pruned.device_id,request_id:pruned.request_id,
+            action:pruned.action,chat_url:pruned.chat_url,prompt_digest:promptDigest(pruned.prompt),
+            job:{...receiptJob,archived:true}
+          });
+        }
       }
       const now=new Date(this.now()).toISOString();
       const job={
-        id:randomUUID(),action,prompt,effort,device_id:deviceId,
+        id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
-        request_id:requestId||null,status:'queued',created_at:now
+        request_id:requestId||null,status:'queued',created_at:now,
+        ...(rollOver?{delivery_action:'start',previous_chat_url:target,
+          handoff_prefix:prefix,handoff_reason:count===null?'unknown_count':'limit_reached'}:{})
       };
       this.#state.jobs.push(job);
       await this.#save();
@@ -357,7 +435,27 @@ export class FileQueue {
     if(!url)return null;
     const i=this.#state.chats.findIndex(c=>c.chat_url===url&&c.device_id===deviceId);
     const previous=i>=0?this.#state.chats[i]:null;
+    const job=this.#state.jobs.find(j=>j.id===jobId);
+    const newChat=transport!=='legacy'&&job?.status==='sent'&&
+      (job.action==='start'||job.delivery_action==='start');
     const next=recordedChat(url,deviceId,jobId,previous,new Date().toISOString(),transport);
+    // Zero requires a newly delivered start and a previously unseen real chat ID.
+    // Existing records without a count remain unknown, never backfilled from jobs.
+    next.continuation_count=previous?continuationCount(previous.continuation_count):newChat?0:null;
+    if(job?.previous_chat_url&&newChat&&url!==job.previous_chat_url) {
+      next.previous_chat_url=job.previous_chat_url;
+      const prior=this.#state.chats.find(c=>c.chat_url===job.previous_chat_url&&c.device_id===deviceId);
+      if(prior) {
+        prior.continuation_count=continuationCount(prior.continuation_count);
+        prior.successor_chat_url=url;
+      } else {
+        const legacy=recordedChat(job.previous_chat_url,deviceId,null,null,new Date().toISOString(),'legacy');
+        legacy.continuation_count=null;
+        legacy.successor_chat_url=url;
+        this.#state.chats.push(legacy);
+      }
+    } else if(previous?.previous_chat_url) next.previous_chat_url=previous.previous_chat_url;
+    if(previous?.successor_chat_url) next.successor_chat_url=previous.successor_chat_url;
     if(i>=0)this.#state.chats[i]=next;else this.#state.chats.push(next);
     if(this.#state.chats.length>MAX_CHATS) {
       this.#state.chats.sort((a,b)=>b.last_seen_at.localeCompare(a.last_seen_at));
@@ -365,10 +463,22 @@ export class FileQueue {
     }
     return next;
   }
+  #markDelivered(job) {
+    if(job.action!=='continue'||job.delivery_action==='start'||job.delivery_counted) return;
+    const chat=this.#state.chats.find(c=>c.chat_url===job.chat_url&&c.device_id===job.device_id);
+    if(chat) {
+      const n=continuationCount(chat.continuation_count);
+      if(n!==null) chat.continuation_count=Math.min(MAX_CONTINUATIONS,n+1);
+    }
+    job.delivery_counted=true; // persisted with status transition: never double count late/duplicate reports
+  }
   #public(job) {
     if (!job) return null;
-    const {prompt, ...publicJob} = job;
-    return {job_id:job.id,...publicJob,chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
+    const {prompt,handoff_prefix,...publicJob} = job;
+    const actual=job.result_chat_url||(job.delivery_action==='start'?null:job.chat_url);
+    const chat=this.#state.chats.find(c=>c.chat_url===actual&&c.device_id===job.device_id);
+    return {job_id:job.id,...publicJob,chat_url:actual,chat_id:chatIdFromUrl(actual),
+      continuation_count:continuationCount(chat?.continuation_count),
       execution:this.#execution(job),next_step:nextStep(job)};
   }
   // What is known about the work itself, separate from delivery of the prompt.
@@ -389,8 +499,8 @@ export class FileQueue {
     this.#emit(JOB_EVENT,[job.id,job.status,job.model_status||'',reason].join('|'),{
       job_id:job.id,request_id:job.request_id||null,fallback_job_id:job.fallback_job_id||null,fallback_of:job.fallback_of||null,
       page_state:job.page_state||null,
-      chat_id:chatIdFromUrl(job.result_chat_url||job.chat_url),
-      chat_url:job.result_chat_url||job.chat_url||null,action:job.action,status:job.status,execution,
+      chat_id:chatIdFromUrl(this.#public(job).chat_url),
+      chat_url:this.#public(job).chat_url,action:job.action,status:job.status,execution,
       summary:String(summary).slice(0,500)});
   }
   // Queues one event per active subscription. The eventId is derived from what
@@ -626,6 +736,8 @@ export class FileQueue {
       if(['claimed','needs_review','failed'].includes(job.status)) {
         Object.assign(job,{status:'sent',timed_out:false,reported_at:job.reported_at||now,
           message:'Delivery confirmed by ChatGPT itself via chatgpt_report'});
+        this.#markDelivered(job);
+        if(job.result_chat_url) this.#recordChat(job.result_chat_url,job.device_id,job.id,'sent');
       }
       // One event per outcome per episode: a repeated identical report is not news,
       // a second blocked after resuming is.
@@ -671,9 +783,12 @@ export class FileQueue {
       job.claimed_at=new Date(this.now()).toISOString();
       await this.#save();
       const sends=job.action==='start'||job.action==='continue';
-      return {...job,request_id:undefined,prompt:sends?job.prompt+callbackFooter(job.id):job.prompt,
+      const effectivePrompt=(job.handoff_prefix||'')+(job.prompt||'');
+      return {...job,action:job.delivery_action||job.action,
+        chat_url:job.delivery_action==='start'?null:job.chat_url,
+        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id):job.prompt,
         mention:sends?APP_NAME:undefined,
-        own_text:sends?job.prompt:undefined}; // lets Chrome recognise its own unsent earlier attempt
+        own_text:sends?effectivePrompt:undefined}; // Browser sees one new-chat send, never the old tab
     });
   }
   async report(deviceId,data) {
@@ -692,7 +807,8 @@ export class FileQueue {
           // ChatGPT may confirm via chatgpt_report before Chrome reports back:
           // still take the conversation address from Chrome's report.
           const late=canonicalChatUrl(data.chat_url);
-          if(late && !job.result_chat_url && (!job.chat_url || late===job.chat_url)) {
+          if(late && !job.result_chat_url &&
+            (job.delivery_action==='start'?late!==job.previous_chat_url:(!job.chat_url||late===job.chat_url))) {
             job.result_chat_url=late;
             this.#recordChat(late,deviceId,id,data.status);
             await this.#save();
@@ -705,13 +821,24 @@ export class FileQueue {
       // Rejecting a final report would wedge the browser worker, so an invalid
       // or unexpected URL is dropped instead of failing the whole report.
       let url=canonicalChatUrl(data.chat_url);
-      if(job.chat_url&&url&&url!==job.chat_url)url=null;
-      // "Not verified" while our own prompt is still sitting in the composer
-      // means it certainly did not go out: say so, so that retry/fallback apply.
-      job.status=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status ? 'blocked' : data.status;
-      if(job.status!==data.status) data={...data,message:'Not sent: the prompt is still in the composer. '+(data.message||'')};
+      const wrongRolloverAddress=job.delivery_action==='start'&&
+        data.status==='sent'&&(!url||url===job.previous_chat_url);
+      if(job.delivery_action==='start') {
+        // No reliable new-chat ID: outcome stays uncertain, not accepted in old tab.
+        if(url===job.previous_chat_url) url=null;
+      } else if(job.chat_url&&url&&url!==job.chat_url)url=null;
+      // An unchanged own draft proves no delivery. Otherwise unknown stays
+      // unknown (never recast as "nothing sent").
+      const ownDraft=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status;
+      job.status=ownDraft?'blocked':wrongRolloverAddress?'needs_review':data.status;
+      if(ownDraft) data={...data,message:'Not sent: the prompt is still in the composer. '+(data.message||'')};
+      if(wrongRolloverAddress) data={...data,message:'New chat ID was not verified; reconcile actual delivery before retrying'};
       job.result_chat_url=url;
-      if(url)this.#recordChat(url,deviceId,id,data.status);
+      if(job.status==='sent') this.#markDelivered(job);
+      // Do not register an unconfirmed new start as an established chat: if the
+      // agent later confirms delivery, that same real ID can safely begin at 0.
+      if(url&&(job.status==='sent'||(job.action!=='start'&&job.delivery_action!=='start')))
+        this.#recordChat(url,deviceId,id,data.status);
       job.message=typeof data.message==='string'?data.message.slice(0,500):'';
       job.page_state=pageState(data.page_state);
       job.dom_probe=domProbe(data.dom_probe);
@@ -727,7 +854,8 @@ export class FileQueue {
         const fallback={id:randomUUID(),action:'start',effort:job.effort,device_id:job.device_id,chat_url:null,
           prompt:'(Продолжение работы из чата '+job.chat_url+': продолжить там не удалось, поэтому задача запущена в новом окне.)\n\n'+job.prompt,
           slack_thread_url:job.slack_thread_url||null,request_id:'fallback-'+job.id,status:'queued',
-          created_at:new Date(this.now()).toISOString(),fallback_of:job.id};
+          created_at:new Date(this.now()).toISOString(),fallback_of:job.id,
+          previous_chat_url:job.chat_url,handoff_reason:'definitely_blocked'};
         this.#state.jobs.push(fallback);
         job.fallback_job_id=fallback.id;
       }

@@ -41,8 +41,9 @@ test('effort defaults to the level already selected in ChatGPT; idempotency; slu
   await assert.rejects(q.enqueue({action:'start',prompt:'different',request_id:'accept-a'}),/Idempotency/);
   assert.equal((await q.enqueue({action:'start',prompt:'x',effort:'xhigh'})).effort,'xhigh');
   const continued=await q.enqueue({action:'continue',chat_ref:ID,prompt:'continue'});
-  assert.equal(continued.chat_url,URL);
-  assert.equal(continued.chat_id,ID);
+  assert.equal(continued.delivery_action,'start','unknown legacy chat must open a new window');
+  assert.equal(continued.chat_url,null,'new chat ID is unavailable before Chrome actually starts it');
+  assert.equal(continued.previous_chat_url,URL);
   await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,chat_url:URL,prompt:'x'}),/Exactly one/);
   await assert.rejects(q.enqueue({action:'continue',chat_ref:'https://example.com/c/'+ID,prompt:'x'}),/Unknown or invalid/);
 });
@@ -52,6 +53,7 @@ test('slug is captured from sent report, survives restart and resolves by job ID
   assert.equal((await q.claim('desktop')).id,task.id);
   assert.equal(q.listChats().total,0,'do not invent a slug before the route exists');
   const reported=await q.report('desktop',{job_id:task.id,status:'sent',chat_url:URL,message:'New chat created via Enter.'});
+  await q.modelReport({job_id:task.id,status:'done',summary:'initial task complete'});
   assert.equal(reported.result_chat_url,URL);
   assert.equal(q.status(task.id).chat_id,ID);
   assert.equal(q.listChats().chats[0].chat_id,ID);
@@ -90,6 +92,10 @@ test('open-only job has no prompt or effort and can never report sent',async t=>
 });
 test('a final report with an odd URL is accepted without the URL instead of wedging the worker',async t=>{
   const {q}=await setup(t);
+  const first=await q.enqueue({action:'start',prompt:'known chat'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:first.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:first.id,status:'done'});
   const task=await q.enqueue({action:'continue',chat_ref:ID,prompt:'next'});
   await q.claim('desktop');
   const done=await q.report('desktop',{job_id:task.id,status:'needs_review',
@@ -99,7 +105,8 @@ test('a final report with an odd URL is accepted without the URL instead of wedg
   const other=await q.enqueue({action:'start',prompt:'x'});
   await q.claim('desktop');
   assert.equal((await q.report('desktop',{job_id:other.id,status:'sent',chat_url:'https://evil.test/c/'+ID})).result_chat_url,null);
-  assert.equal(q.listChats().total,0);
+  assert.equal(q.listChats().total,1,'only the initial valid chat is registered');
+  assert.equal(q.listChats().chats[0].chat_url,URL);
 });
 
 test('a temporary local ChatGPT address is never stored as a slug',()=>{
@@ -166,14 +173,15 @@ test('a read reports the last user message so needs_review can be resolved',asyn
   assert.equal(done.last_user_text,'PING 2');
   assert.match(done.next_step,/last ChatGPT reply/);
 });
-test('old needs_review jobs never fill the queue up',async t=>{
+test('unresolved needs_review jobs are never evicted merely to make queue room',async t=>{
   const {file}=await setup(t);
   const state={device_status:{},chats:[]};
   state.jobs=Array.from({length:500},(_,i)=>({id:'j'+i,action:'start',device_id:'desktop',status:'needs_review',created_at:OLD}));
   await writeFile(file,JSON.stringify(state));
   const r=new FileQueue(file,{desktop:token});
   await r.initialize();
-  assert.equal((await r.enqueue({action:'start',prompt:'fresh'})).status,'queued');
+  await assert.rejects(r.enqueue({action:'start',prompt:'fresh'}),/Queue capacity reached/);
+  assert.equal(r.status('j0').status,'needs_review','an uncertain outcome cannot be erased by capacity pruning');
 });
 test('ChatGPT confirms through MCP: started resolves uncertainty, done carries the summary',async t=>{
   const {q}=await setup(t);
@@ -278,6 +286,10 @@ test('page_state from Chrome is reduced to known plain fields',async t=>{
 
 test('continue is refused while the agent in that chat is working or a prompt is on its way',async t=>{
   const {q}=await setup(t);
+  const first=await q.enqueue({action:'start',prompt:'initial work'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:first.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:first.id,status:'done'});
   const a=await q.enqueue({action:'continue',chat_ref:ID,prompt:'first'});
   await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,prompt:'second'}),/already on its way/);
   await q.claim('desktop');

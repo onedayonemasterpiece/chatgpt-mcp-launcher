@@ -69,6 +69,7 @@ test('MCP -> local Chrome queue protocol, idempotency, security, persistence',as
  assert.equal(JSON.parse(out.data.result.content[0].text).result_chat_url,chatUrl);
  assert.equal((await req('/mcp','POST',rpc('tools/list',{}),{'Content-Type':'application/json'})).status,401);
  assert.equal((await req('/mcp','POST',rpc('tools/list',{}),{...headers,Origin:'https://evil.example'})).status,403);
+ await queue.modelReport({job_id:job.id,status:'done',summary:'initial task finished'});
  const continueJob=await req('/mcp','POST',rpc('tools/call',{name:'chatgpt_continue',arguments:{prompt:'Follow-up',chat_url:chatUrl,device_id:'win',effort:'medium'}}),headers);
  const next=JSON.parse(continueJob.data.result.content[0].text);
  assert.equal(next.action,'continue');
