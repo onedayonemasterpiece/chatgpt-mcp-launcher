@@ -16,18 +16,20 @@ const MAX_CONTINUATIONS = 5;
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
-function handoffPrefix(url, sourcePrompt, nextPrompt) {
+function handoffPrefix(url, sourcePrompt, nextPrompt, jobId) {
+  // Chrome validates the FINAL payload, after claim() adds callbackFooter.
+  const budget=MAX_PROMPT-callbackFooter(jobId).length;
   const intro='(Продолжение работы из чата '+url+'. Launcher открыл НОВОЕ окно вместо дальнейшего продолжения старого. '+
     'Используй предыдущий чат как контекст; не запускай второй параллельный экземпляр задания.)\n\n';
   const suffix='Текущее поручение (выполни его без потери деталей):\n';
-  if(intro.length+suffix.length+nextPrompt.length>MAX_PROMPT) {
-    throw Error('Handoff plus prompt exceeds 30000 characters; shorten the new prompt before retrying. Nothing was sent.');
+  if(intro.length+suffix.length+nextPrompt.length>budget) {
+    throw Error('Handoff plus callbackFooter exceeds 30000 characters; shorten the new prompt before retrying. Nothing was sent.');
   }
   let original='';
   if(typeof sourcePrompt==='string' && sourcePrompt.length) {
     const heading='Исходный prompt предыдущего чата (контекст):\n';
     const end='\n\n';
-    const room=MAX_PROMPT-intro.length-suffix.length-nextPrompt.length-heading.length-end.length;
+    const room=budget-intro.length-suffix.length-nextPrompt.length-heading.length-end.length;
     const note='\n[Остальное — по ссылке выше.]';
     if(room>0) {
       // Preserve the entire original prompt whenever it fits. Otherwise keep
@@ -357,7 +359,12 @@ export class FileQueue {
       const count=continuationCount(existingChat?.continuation_count);
       const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS);
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
-      const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt):null;
+      const jobId=randomUUID();
+      const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId):null;
+      // Reject before queue admission: this exact payload is what Chrome's
+      // preparePrompt validates, including the callback footer added at claim.
+      if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length>MAX_PROMPT)
+        throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
         // Never evict an ambiguous send: losing that receipt could authorize a
         // second browser send after a restart. The existing bounded queue may
@@ -380,7 +387,7 @@ export class FileQueue {
       }
       const now=new Date(this.now()).toISOString();
       const job={
-        id:randomUUID(),action,prompt,effort,device_id:deviceId,
+        id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,

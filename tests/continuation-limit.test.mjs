@@ -305,6 +305,29 @@ test('handoff includes the entire original prompt when it fits, not a 1800 chara
   assert.ok(worker.own_text.includes('Keep implementing'));
 });
 
+test('handoff worker payload includes callbackFooter inside 30000 character limit',async t=>{
+  const {q,file}=await setup(t);
+  const original='Original task: '+ 'A'.repeat(29400);
+  await startKnown(q,URL,original);
+  const data=JSON.parse(await readFile(file,'utf8'));
+  data.chats.find(c=>c.chat_url===URL).continuation_count=5;
+  await writeFile(file,JSON.stringify(data));
+  const r=new FileQueue(file,{desktop:TOKEN});
+  await r.initialize();
+  const continuation='Sixth continuation: '+ 'B'.repeat(900);
+  const j=await r.enqueue({action:'continue',chat_ref:ID,prompt:continuation});
+  assert.equal(j.delivery_action,'start');
+  const worker=await r.claim('desktop');
+  assert.equal(worker.id,j.id);
+  assert.equal(worker.action,'start');
+  assert.equal(worker.chat_url,null);
+  assert.ok(worker.own_text.includes(continuation),'new instruction is never truncated');
+  assert.match(worker.own_text,/Остальное — по ссылке выше/,'long opening prompt is truncated with source link');
+  assert.ok(worker.prompt.endsWith('job_id='+j.id+
+    ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)'));
+  assert.equal(worker.prompt.length,30000,'maximal handoff must fit Chrome preparePrompt exactly, including callbackFooter');
+});
+
 test('at queue capacity no needs_review or unconfirmed job can be silently pruned',async t=>{
   const {file}=await setup(t);
   const now=new Date().toISOString();
