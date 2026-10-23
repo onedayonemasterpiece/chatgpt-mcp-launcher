@@ -193,6 +193,7 @@ async function runDriver(script,tab,payload) {
   const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
     func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
       payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+      payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
       globalThis.chatGPTLauncherRun(payload),args:[payload]});
   return result;
 }
@@ -216,8 +217,8 @@ async function closeChat(job,script) {
     message:`Closed ${closed} tab(s)`+(kept.length?`; left open: ${kept.join(', ')}`:'')};
 }
 async function execute(job) {
-  if(!['start','continue','open','read','close'].includes(job.action))throw Error('Unsupported browser action');
-  const prompt=['open','read','close'].includes(job.action)?null:preparePrompt(job);
+  if(!['start','continue','open','read','close','reconcile'].includes(job.action))throw Error('Unsupported browser action');
+  const prompt=['open','read','close','reconcile'].includes(job.action)?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
   if(job.action==='close') return closeChat(job,driverScript());
   const tab=await openChatTab(job);
@@ -225,7 +226,25 @@ async function execute(job) {
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
   const script=driverScript();
-  let result=await runDriver(script,tab,{...job,prompt});
+  let result;
+  try { result=await runDriver(script,tab,{...job,prompt}); }
+  catch(err) {
+    // A single Send click can navigate/unmount Chrome's execution frame before
+    // executeScript returns. Re-inject READ-ONLY into the live frame: an exact
+    // job marker proves delivery; an unreadable or absent marker stays unknown.
+    if(!['start','continue'].includes(job.action) || !/frame.*removed|frame.*navigat/i.test(String(err.message||err))) throw err;
+    try {
+      await awaitTab(tab.id);
+      const probe=await runDriver(script,tab,{action:'reconcile',verify_job_id:job.id});
+      const observed=probe?.result;
+      if(observed?.delivery_evidence==='sent' &&
+          (job.action==='start'?validChatUrl(observed.chat_url):sameConversationUrl(observed.chat_url,job.chat_url))) {
+        return {status:'sent',chat_url:observed.chat_url,
+          message:'Delivery recovered after frame navigation from a visible per-job marker; no retry'};
+      }
+    } catch {} // Recovery itself is advisory: NEVER send or assume not sent.
+    throw err;
+  }
   if(job.action==='start' && result?.result?.reason==='draft') {
     // A reused "New chat" tab holds someone's unsent draft; nothing was typed
     // there, so start once more in a fresh tab instead of blocking.
@@ -238,6 +257,11 @@ async function execute(job) {
     ...(result.result.page_state&&typeof result.result.page_state==='object'?{page_state:result.result.page_state}:{}),
     ...(result.result.dom_probe&&typeof result.result.dom_probe==='object'?{dom_probe:result.result.dom_probe}:{}),
     message:result.result.message||''};
+  if(job.action==='reconcile') {
+    out.delivery_evidence=result.result.delivery_evidence==='sent'?'sent':'unknown';
+    out.evidence_kind=['user_message_marker','conversation_marker'].includes(result.result.evidence_kind)?
+      result.result.evidence_kind:'unconfirmed';
+  }
   if(job.action==='read') {
     out.reply_text=typeof result.result.reply_text==='string' ? result.result.reply_text.slice(0,20000) : null;
     out.reply_generating=result.result.reply_generating===true;
@@ -248,8 +272,8 @@ async function execute(job) {
 async function flushPending(config) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
-  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe}=pendingReport;
-  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe});}
+  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind}=pendingReport;
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind});}
   catch(err) {
     // A report the relay refuses outright would be resent forever and block
     // heartbeats and every later job. Network errors and 401 stay pending.

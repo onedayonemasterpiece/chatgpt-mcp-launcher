@@ -404,6 +404,35 @@
     return {status:'needs_review',chat_url:chatUrl(),
       message:`Submitted via ${method}, but delivery was not verified (previous URL: ${before}). Do not retry automatically.`+effortNote+mentionNote};
   }
+  // Verify ONE previously attempted send without typing, navigating, or
+  // reading any reply text back to the relay. The per-job callback marker is
+  // unique to that attempt. Missing markers/markup prove nothing.
+  async function reconcile(job) {
+    if(!job || job.action!=='reconcile' || !/^[0-9a-f-]{36}$/i.test(job.verify_job_id||''))
+      return {status:'failed',message:'Invalid reconciliation target'};
+    if(!isConversationUrl(window.location.href))
+      return {status:'read',delivery_evidence:'unknown',evidence_kind:'wrong_page',message:'No verified conversation URL'};
+    await waitForComposer();
+    await sleep(500);
+    const marker='job_id='+job.verify_job_id;
+    const url=chatUrl();
+    const userTurns=[...document.querySelectorAll('[data-message-author-role="user"]')];
+    const userMatch=userTurns.some(el=>(el.innerText||el.textContent||'').includes(marker));
+    const draft=composer();
+    const inDraft=!!draft && draftText(draft).includes(marker);
+    const roots=[...document.querySelectorAll('main')];
+    // ChatGPT sometimes omits all role/testid markers. A unique callback
+    // marker visibly rendered in the one conversation main, and NOT in the
+    // composer, is still affirmative evidence. Never infer non-send from its
+    // absence; the conversation may not be loaded or may be virtualized.
+    const mainMatch=roots.length===1 && !inDraft &&
+      (roots[0].innerText||'').includes(marker);
+    const evidence_kind=userMatch?'user_message_marker':mainMatch?'conversation_marker':'unconfirmed';
+    return {status:'read',chat_url:url,
+      delivery_evidence:evidence_kind==='unconfirmed'?'unknown':'sent',evidence_kind,
+      message:evidence_kind==='unconfirmed'?'No positive delivery evidence; original job remains needs_review':
+        'Original job marker was observed in the conversation; no prompt was resent'};
+  }
   function lastReply() {
     const replies=[...document.querySelectorAll('[data-message-author-role="assistant"]')];
     const text=(replies.at(-1)?.innerText || replies.at(-1)?.textContent || '').trim();
@@ -437,6 +466,7 @@
   }
   globalThis.chatGPTLauncherRun = run;
   globalThis.chatGPTLauncherRead = read;
+  globalThis.chatGPTLauncherReconcile = reconcile;
   globalThis.chatGPTLauncherProbe = () => {
     const el=composer();
     return {draft:!!(el && draftText(el).trim()),answering:replyInProgress()};
