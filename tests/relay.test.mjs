@@ -29,7 +29,7 @@ test('MCP -> local Chrome queue protocol, idempotency, security, persistence',as
  assert.equal(out.status,200);
  assert.equal(out.data.result.serverInfo.name,'chatgpt-local-chrome-launcher');
  out=await req('/mcp','POST',rpc('tools/list',{}),headers);
- assert.deepEqual(out.data.result.tools.map(t=>t.name),['chatgpt_start','chatgpt_continue','chatgpt_read_reply','chatgpt_task_status','chatgpt_list_chats','chatgpt_retry','chatgpt_close_chat','chatgpt_open','chatgpt_coordination_set','chatgpt_coordination_close','chatgpt_report','chatgpt_device_status']);
+ assert.deepEqual(out.data.result.tools.map(t=>t.name),['chatgpt_start','chatgpt_continue','chatgpt_read_reply','chatgpt_reconcile','chatgpt_task_status','chatgpt_list_chats','chatgpt_retry','chatgpt_close_chat','chatgpt_open','chatgpt_coordination_set','chatgpt_coordination_close','chatgpt_report','chatgpt_device_status']);
  out=await req('/mcp','POST',rpc('tools/call',{name:'chatgpt_start',arguments:{prompt:'Check the project',effort:'xhigh',device_id:'win',request_id:'test-1'}}),headers);
  const job=JSON.parse(out.data.result.content[0].text);
  assert.equal(job.status,'queued');

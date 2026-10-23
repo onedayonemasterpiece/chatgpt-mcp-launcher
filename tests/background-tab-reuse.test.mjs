@@ -39,6 +39,12 @@ function fixture(openTabs=[],opts={}) {
       calls.injections.push(params.target.tabId);
       if(params.files) return [];
       if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,answering:false}}];
+      if(opts.frameRemovedOnce && !calls.frameRemoved && ['start','continue'].includes(params.args[0].action)) {
+        calls.frameRemoved=true;
+        throw Error('Frame 0 was removed');
+      }
+      if(params.args[0].action==='reconcile') return [{result:opts.recoveryEvidence||
+        {status:'read',chat_url:CHAT,delivery_evidence:'unknown',evidence_kind:'unconfirmed'}}];
       if(opts.driverResults?.length) return [{result:opts.driverResults.shift()}];
       return [{result:{
         status:'sent',chat_url:params.args[0].chat_url??CHAT,message:'fixture send clicked',
@@ -143,6 +149,42 @@ test('start falls back to a fresh tab when the open New chat tab holds a draft',
   assert.equal(f.calls.created.length,1);
   assert.equal(f.calls.created[0].url,HOME);
   assert.deepEqual(f.calls.injections,[32,32,100,100]);
+});
+
+test('Frame 0 removed after Send is recovered only from a matching read-only job marker',async()=>{
+  const f=fixture([{id:36,url:CHAT}],{frameRemovedOnce:true,recoveryEvidence:{
+    status:'read',chat_url:CHAT,delivery_evidence:'sent',evidence_kind:'user_message_marker'}});
+  const job='6ed884fe-1026-4728-2017-d6c47282017a';
+  const result=await f.execute({id:job,action:'continue',chat_url:CHAT,prompt:'Do once'});
+  assert.equal(result.status,'sent');
+  assert.match(result.message,/no retry/);
+  assert.deepEqual(f.calls.injections,[36,36,36,36],
+    'one send attempt and one read-only recovery, no additional send');
+  assert.deepEqual(f.calls.created,[]);
+});
+
+test('Frame 0 removed with an unreadable or mismatched conversation remains unknown, never retried',async()=>{
+  for(const evidence of [
+    {status:'read',chat_url:CHAT,delivery_evidence:'unknown'},
+    {status:'read',chat_url:OTHER,delivery_evidence:'sent',evidence_kind:'user_message_marker'}
+  ]) {
+    const f=fixture([{id:37,url:CHAT}],{frameRemovedOnce:true,recoveryEvidence:evidence});
+    await assert.rejects(()=>f.execute({id:'6ed884fe-1026-4728-2017-d6c47282017a',
+      action:'continue',chat_url:CHAT,prompt:'Do once'}),/Frame 0 was removed/);
+    assert.deepEqual(f.calls.injections,[37,37,37,37]);
+  }
+});
+
+test('a queued reconcile job performs no Send and forwards only boolean evidence',async()=>{
+  const f=fixture([{id:38,url:CHAT}],{recoveryEvidence:{status:'read',chat_url:CHAT,
+    delivery_evidence:'sent',evidence_kind:'conversation_marker'}});
+  const out=await f.execute({action:'reconcile',chat_url:CHAT,
+    verify_job_id:'6ed884fe-1026-4728-2017-d6c47282017a'});
+  assert.equal(out.status,'read');
+  assert.equal(out.delivery_evidence,'sent');
+  assert.equal(out.evidence_kind,'conversation_marker');
+  assert.deepEqual(f.calls.injections,[38,38]);
+  assert.deepEqual(f.calls.created,[]);
 });
 
 test('read reuses the conversation tab and passes the reply through',async()=>{

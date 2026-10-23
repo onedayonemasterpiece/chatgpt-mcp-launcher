@@ -9,12 +9,12 @@ const VERSION = '2025-11-25';
 // 2025-11-25 handshake; a client picks one with server/discover.
 const MODERN = '2026-07-28';
 const META_VERSION = 'io.modelcontextprotocol/protocolVersion';
-const SERVER_INFO = {name:'chatgpt-local-chrome-launcher',version:'0.3.0'};
+const SERVER_INFO = {name:'chatgpt-local-chrome-launcher',version:'0.3.17'};
 const INSTRUCTIONS = [
   'Drives ChatGPT in the owner\'s own Chrome. Every action is a job: the call returns job_id at once, the browser does the work within seconds to a few minutes.',
   'Workflow:',
   '1. New conversation: chatgpt_start(prompt). Then call chatgpt_task_status(job_id) every ~20 s until status is no longer queued/claimed. On "sent" keep chat_id: it identifies this conversation from now on.',
-  '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id).',
+  '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id). For needs_review, use chatgpt_reconcile(job_id): read-only check of the exact original job marker, without sending or marking work done; absent/unreadable evidence keeps needs_review.',
   '3. Follow-up: chatgpt_continue(chat_ref = chat_id, prompt). The launcher permits at most FIVE delivered continuations per real chat_id; at count 5, or whenever an old count is unknown/missing/null, this call automatically creates ONE new ChatGPT chat with context. Follow the NEW chat_id in chatgpt_task_status. A new start begins at count 0.',
   '4. Lost a chat_id: chatgpt_list_chats.',
   '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
@@ -47,6 +47,10 @@ const TOOL_LIST = [
   {
     name:'chatgpt_read_reply',description:'Unreliable fallback (ChatGPT page markup often cannot be read; prefer model_status/model_summary): get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
+  },
+  {
+    name:'chatgpt_reconcile',description:'Safely inspect the EXISTING conversation for the unique marker of a specific needs_review start/continue job. Performs one read-only Chrome check; never submits, retries, creates a chat, clears unknown from absence, or invents model_report/DONE. If the marker is positively observed outside the composer, the original job becomes sent (execution remains separately unconfirmed until model reports). If unreadable/absent/wrong chat, the original remains needs_review. Poll this reconciliation job with chatgpt_task_status, then inspect the ORIGINAL job_id.',
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'Exact needs_review start/continue job_id; not a conversation ID.'},...COMMON},required:['job_id'],additionalProperties:false},
   },
   {
     name:'chatgpt_task_status', description:'Status by job_id: queued/claimed, sent, read, opened, blocked (nothing sent), expired (never claimed), needs_review (may be sent; reconcile before any repeat/continue), failed. Exposes current chat_id/chat_url, continuation_count (integer 0..5 or null unknown), and for automatic new-chat handoff previous_chat_url plus delivery_action=start; model_status is separate. Never invent a new chat ID; no in-flight job stays claimed over 15 min.',
@@ -208,6 +212,9 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
+            } else if (name==='chatgpt_reconcile') {
+              if(!args.job_id) throw new Error('job_id is required');
+              value=await queue.reconcile(args.job_id,args.request_id,args.device_id||'desktop');
             } else if (name==='chatgpt_retry') {
               if(!args.job_id) throw new Error('job_id is required');
               value=await queue.retry(args.job_id,args.request_id);

@@ -99,6 +99,10 @@ function nextStep(job) {
     case 'opened':
       return 'The conversation is open in Chrome. Nothing was sent.';
     case 'read':
+      if(job.reconcile_of) return job.reconcile_status==='sent' ?
+        'The specific prompt was confirmed in this conversation; see the original job for execution/model_status (not inferred done).' :
+        job.reconcile_status==='blocked' ? 'The original prompt was proven unsent; it may now be retried using chatgpt_retry(original job_id).' :
+        'No decisive delivery evidence was found. The original job remains needs_review; never blind retry or hand off.';
       if(job.reply_generating) return 'ChatGPT is still writing. Call chatgpt_read_reply again in about 30 seconds.';
       // last_user_text tells whether a prompt sent earlier actually arrived.
       return job.reply_text ? 'reply_text holds the last ChatGPT reply.' :
@@ -300,19 +304,26 @@ export class FileQueue {
   async enqueue(args) {
     return this.#run(async()=>{
       const action=args.action;
-      if(!['start','continue','open','read','close'].includes(action))throw Error('Invalid action');
-      const noPrompt=action==='open'||action==='read'||action==='close';
+      if(!['start','continue','open','read','close','reconcile'].includes(action))throw Error('Invalid action');
+      const noPrompt=['open','read','close','reconcile'].includes(action);
       const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
       if(effort!==null&&!EFFORTS.includes(effort))throw Error('Invalid effort');
       const deviceId=args.device_id||'desktop';
       if(!Object.hasOwn(this.devices,deviceId))throw Error('Unknown device_id');
+      const reviewSource=action==='reconcile'?this.#state.jobs.find(j=>j.id===args.job_id&&j.device_id===deviceId&&
+        ['start','continue'].includes(j.action)):null;
+      if(action==='reconcile' && !reviewSource)
+        throw Error('Reconciliation requires an existing start/continue job; no state was changed');
       const hasUrl=typeof args.chat_url==='string'&&args.chat_url.trim().length>0;
       const hasRef=typeof args.chat_ref==='string'&&args.chat_ref.trim().length>0;
-      if(action!=='start' && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
+      if(!['start','reconcile'].includes(action) && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
       let target=null;
-      if(action!=='start') {
+      if(action==='reconcile') {
+        target=canonicalChatUrl(reviewSource.result_chat_url||reviewSource.chat_url);
+        if(!target) throw Error('No verified conversation URL for read-only reconciliation; keep needs_review');
+      } else if(action!=='start') {
         target=hasUrl?canonicalChatUrl(args.chat_url):this.resolveChat(args.chat_ref,deviceId);
         if(!target)throw Error('Unknown or invalid ChatGPT conversation reference. Pass the chat_id from chatgpt_task_status or chatgpt_list_chats, or a full https://chatgpt.com/c/... URL');
       }
@@ -322,7 +333,8 @@ export class FileQueue {
       if(requestId) {
         const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
         if(existing) {
-          if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target)
+          if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target||
+            (action==='reconcile'&&existing.reconcile_of!==reviewSource.id))
             throw Error('Idempotency key belongs to a different operation');
           return this.#public(existing);
         }
@@ -330,12 +342,22 @@ export class FileQueue {
         // compact receipt survives so a lost response never creates a new send.
         const receipt=this.#state.request_receipts.find(r=>r.device_id===deviceId&&r.request_id===requestId);
         if(receipt) {
-          if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt))
+          if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt)||
+            (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id))
             throw Error('Idempotency key belongs to a different operation');
           return {...this.#public(receipt.job),archived:true};
         }
       }
+      if(action==='reconcile' && reviewSource.status!=='needs_review')
+        throw Error('Original job is no longer needs_review; inspect its current status instead');
       this.#expire(this.now());
+      // A repeated read-only verification never creates another Chrome action
+      // while an earlier verification of the same uncertain job is pending.
+      if(action==='reconcile') {
+        const pending=this.#state.jobs.find(j=>j.action==='reconcile'&&j.reconcile_of===reviewSource.id&&
+          ['queued','claimed'].includes(j.status));
+        if(pending) return this.#public(pending);
+      }
       // Serialized with enqueue/report/modelReport: a pending or uncertain send
       // reserves the chat until a definite outcome, including across restarts.
       if(action==='continue') {
@@ -390,6 +412,7 @@ export class FileQueue {
         id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
+        ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
           handoff_prefix:prefix,handoff_reason:count===null?'unknown_count':'limit_reached'}:{})
       };
@@ -397,6 +420,11 @@ export class FileQueue {
       await this.#save();
       return this.#public(job);
     });
+  }
+  // Read-only verification of one uncertain delivery. It never resends the
+  // original prompt and cannot clear uncertainty without a positive receipt.
+  async reconcile(jobId,requestId,deviceId='desktop') {
+    return this.enqueue({action:'reconcile',job_id:jobId,request_id:requestId,device_id:deviceId});
   }
   // Re-sends the exact stored prompt of a job that certainly sent nothing, into
   // the same chat. The caller never sees the prompt, so it cannot retype it;
@@ -788,7 +816,8 @@ export class FileQueue {
         chat_url:job.delivery_action==='start'?null:job.chat_url,
         request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id):job.prompt,
         mention:sends?APP_NAME:undefined,
-        own_text:sends?effectivePrompt:undefined}; // Browser sees one new-chat send, never the old tab
+        own_text:sends?effectivePrompt:undefined,
+        ...(job.action==='reconcile'?{verify_job_id:job.reconcile_of}:{} )}; // Browser sees one new-chat send, never the old tab
     });
   }
   async report(deviceId,data) {
@@ -798,7 +827,7 @@ export class FileQueue {
       const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
       if(!job)throw Error('Unknown job');
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
-      if(data.status==='read' && job.action!=='read')throw Error('Only read jobs can report read');
+      if(data.status==='read' && !['read','reconcile'].includes(job.action))throw Error('Only read jobs (or reconciliation) can report read');
       if(data.status==='closed' && job.action!=='close')throw Error('Only close jobs can report closed');
       if(['open','read','close'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
@@ -848,6 +877,30 @@ export class FileQueue {
         job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
       job.reported_at=new Date(this.now()).toISOString();
+      if(job.action==='reconcile') {
+        const source=this.#state.jobs.find(j=>j.id===job.reconcile_of&&j.device_id===deviceId);
+        // A cryptographically unguessable per-job marker, found outside the
+        // composer in the exact conversation, is positive delivery evidence.
+        // A missing message, stale/empty DOM, or another chat is NOT evidence
+        // of non-delivery. There is no operator override and no fabricated DONE.
+        const proof=data.delivery_evidence==='sent' &&
+          ['user_message_marker','conversation_marker'].includes(data.evidence_kind) &&
+          job.status==='read' && url===job.chat_url &&
+          source?.status==='needs_review' &&
+          (source.delivery_action!=='start'||url!==source.previous_chat_url);
+        if(proof) {
+          source.status='sent';
+          source.timed_out=false;
+          source.reported_at=source.reported_at||job.reported_at;
+          source.message='Delivery confirmed by read-only browser reconciliation ('+data.evidence_kind+')';
+          source.result_chat_url=url;
+          this.#markDelivered(source); // once, on the original job only
+          this.#recordChat(url,deviceId,source.id,'sent');
+          this.#notifyJob(source,'reconciled');
+        }
+        job.reconcile_status=source?.status||'unknown';
+        job.reconcile_evidence=proof?data.evidence_kind:'unconfirmed';
+      }
       // A continue that could not be delivered must not lose the line of work:
       // start the same prompt in a new chat right away (owner decision, 22 Oct).
       if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id) {
