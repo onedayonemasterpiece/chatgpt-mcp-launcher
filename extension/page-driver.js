@@ -412,21 +412,38 @@
       return {status:'failed',message:'Invalid reconciliation target'};
     if(!isConversationUrl(window.location.href))
       return {status:'read',delivery_evidence:'unknown',evidence_kind:'wrong_page',message:'No verified conversation URL'};
-    await waitForComposer();
+    const ready=await waitForComposer();
     await sleep(500);
     const marker='job_id='+job.verify_job_id;
     const url=chatUrl();
+    // Never interpret text from an unsent editor as a delivered user turn.
+    // Work on a detached clone so this read-only check does not touch the UI.
+    const nonEditableText=root=>{
+      if(!root || typeof root.cloneNode!=='function' || typeof root.matches!=='function')
+        return '';
+      const selector='[contenteditable],textarea,input,[role="textbox"],[role="searchbox"]';
+      try {
+        if(root.matches(selector)) return '';
+        const copy=root.cloneNode(true);
+        if(typeof copy.querySelectorAll!=='function') return '';
+        for(const el of copy.querySelectorAll(selector)) {
+          if(typeof el.remove!=='function') return '';
+          el.remove();
+        }
+        return copy.innerText||copy.textContent||'';
+      } catch {return '';} // Uninspectable markup is unknown, never proof.
+    };
     const userTurns=[...document.querySelectorAll('[data-message-author-role="user"]')];
-    const userMatch=userTurns.some(el=>(el.innerText||el.textContent||'').includes(marker));
+    const userMatch=userTurns.some(el=>nonEditableText(el).includes(marker));
     const draft=composer();
+    const composerKnown=!!ready && draft===ready;
     const inDraft=!!draft && draftText(draft).includes(marker);
     const roots=[...document.querySelectorAll('main')];
-    // ChatGPT sometimes omits all role/testid markers. A unique callback
-    // marker visibly rendered in the one conversation main, and NOT in the
-    // composer, is still affirmative evidence. Never infer non-send from its
-    // absence; the conversation may not be loaded or may be virtualized.
-    const mainMatch=roots.length===1 && !inDraft &&
-      (roots[0].innerText||'').includes(marker);
+    // The main fallback is permitted only with a uniquely recognized, stable
+    // composer. A missing/ambiguous editor may be nested inside main itself.
+    // Exclude ALL editable descendants, not just the recognized composer.
+    const mainMatch=composerKnown && roots.length===1 && !inDraft &&
+      nonEditableText(roots[0]).includes(marker);
     const evidence_kind=userMatch?'user_message_marker':mainMatch?'conversation_marker':'unconfirmed';
     return {status:'read',chat_url:url,
       delivery_evidence:evidence_kind==='unconfirmed'?'unknown':'sent',evidence_kind,

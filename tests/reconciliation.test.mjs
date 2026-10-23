@@ -113,17 +113,35 @@ test('late real model report after unreadable reconciliation resolves only deliv
 });
 
 const driver=await readFile(new globalThis.URL('../extension/page-driver.js',import.meta.url),'utf8');
-function inspect({main='',user='',draft='',wrongPage=false,noMain=false}={}) {
-  const marker='job_id='+ID;
-  const editor={id:'prompt-textarea',innerText:draft,textContent:draft,isConnected:true,
+function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
+                  unknownComposer=false,ambiguousComposer=false,
+                  mainEditable='',userEditable=''}={}) {
+  const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
+    innerText:draft,textContent:draft,isConnected:true,
     getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null};
-  const mainNode={innerText:main};
-  const userNode={innerText:user,textContent:user};
+  // main.innerText includes the UNSENT contenteditable's text, exactly as Chrome
+  // does. The clone used by the safe proof removes editable descendants.
+  const node=(ordinary,editable='')=>({
+    innerText:ordinary+editable,textContent:ordinary+editable,
+    matches:()=>false,
+    cloneNode(){
+      let text=ordinary+editable;
+      return {
+        get innerText(){return text;},get textContent(){return text;},
+        querySelectorAll:()=>editable?[{remove(){text=ordinary;}}]:[]
+      };
+    }
+  });
+  const mainNode=node(main,mainEditable);
+  const userNode=node(user,userEditable);
+  const another=ambiguousComposer?{...editor}:null;
   const document={
     querySelectorAll(selector){
-      if(selector==='[contenteditable="true"],textarea')return [editor];
+      if(selector==='[contenteditable="true"],textarea')
+        return ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
-      if(selector==='[data-message-author-role="user"]')return user?[userNode]:[];
+      if(selector==='[data-message-author-role="user"]')
+        return user||userEditable?[userNode]:[];
       return [];
     }
   };
@@ -144,6 +162,25 @@ test('read-only browser probe handles marker inside visible main without role se
   const result=await inspect({main:'Conversation turn: job_id='+ID+' current'});
   assert.equal(result.delivery_evidence,'sent');
   assert.equal(result.evidence_kind,'conversation_marker');
+});
+test('unrecognized or ambiguous composer and marker only in unsent contenteditable cannot prove delivery',async()=>{
+  const marker='job_id='+ID;
+  // Reproduces root review #6366449691: main.innerText contains a marker
+  // exclusively because the UNSENT editor is nested inside main.
+  for(const sample of [
+    {unknownComposer:true,mainEditable:marker},
+    {ambiguousComposer:true,mainEditable:marker},
+    {mainEditable:marker},
+    {unknownComposer:true,main:'Visible unrelated text '+marker},
+    {ambiguousComposer:true,main:'Visible unrelated text '+marker},
+    {userEditable:marker},
+    {unknownComposer:true,userEditable:marker}
+  ]) {
+    const result=await inspect(sample);
+    assert.equal(result.delivery_evidence,'unknown',JSON.stringify(sample));
+    assert.equal(result.evidence_kind,'unconfirmed');
+    assert.ok(!JSON.stringify(result).includes('Visible unrelated text'));
+  }
 });
 test('marker only in unsent editor, absent content or unrendered page is NEVER sent evidence',async()=>{
   for(const sample of [{main:'',draft:'job_id='+ID},
