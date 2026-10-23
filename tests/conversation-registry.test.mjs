@@ -311,6 +311,13 @@ test('"not verified" with our prompt still in the composer is reported as not se
   assert.equal(r.status,'blocked');
   assert.match(r.message,/still in the composer/);
   assert.ok(r.fallback_job_id,'a continue goes on in a new chat');
+  assert.doesNotMatch(r.message,/Do not retry/);
+  const f=await q.report('desktop',{job_id:(await q.claim('desktop')).id,status:'needs_review',
+    message:'Submitted via Enter, but delivery was not verified (previous URL: https://chatgpt.com/). Do not retry automatically.',
+    page_state:{composer_text:'our_prompt',composer:'present'}});
+  assert.equal(f.status,'blocked','the fallback start is proven unsent too');
+  assert.match(f.next_step,/chatgpt_retry\(job_id\)/);
+  assert.match(f.next_step,/Do not drop the task/);
   const b=await q.enqueue({action:'start',prompt:'other'});
   await q.claim('desktop'); await q.claim('desktop');
   const s=await q.report('desktop',{job_id:b.id,status:'needs_review',page_state:{composer_text:'empty'}});
