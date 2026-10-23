@@ -416,22 +416,25 @@
     await sleep(500);
     const marker='job_id='+job.verify_job_id;
     const url=chatUrl();
-    // Never interpret text from an unsent editor as a delivered user turn.
-    // Work on a detached clone so this read-only check does not touch the UI.
+    // Only text rendered in the LIVE page can prove delivery. A detached
+    // clone's innerText falls back to textContent (including hidden messages).
+    // Never use an editable subtree, even when the composer is unrecognized.
     const nonEditableText=root=>{
-      if(!root || typeof root.cloneNode!=='function' || typeof root.matches!=='function')
-        return '';
       const selector='[contenteditable],textarea,input,[role="textbox"],[role="searchbox"]';
-      try {
-        if(root.matches(selector)) return '';
-        const copy=root.cloneNode(true);
-        if(typeof copy.querySelectorAll!=='function') return '';
-        for(const el of copy.querySelectorAll(selector)) {
-          if(typeof el.remove!=='function') return '';
-          el.remove();
-        }
-        return copy.innerText||copy.textContent||'';
-      } catch {return '';} // Uninspectable markup is unknown, never proof.
+      const hasRenderedMarker=node=>{
+        try {
+          if(!node || typeof node.matches!=='function' || node.matches(selector) ||
+             !visible(node) || typeof node.innerText!=='string' ||
+             !node.innerText.includes(marker) || typeof node.querySelectorAll!=='function')
+            return false;
+          // A subtree without editors is a reliable rendered-text witness.
+          if(!node.querySelectorAll(selector).length) return true;
+          // Otherwise require a *single* visible noneditable child witness.
+          // Mixed/direct text is intentionally unknown instead of false sent.
+          return [...(node.children||[])].some(hasRenderedMarker);
+        } catch {return false;} // Uninspectable markup is unknown, never proof.
+      };
+      return hasRenderedMarker(root)?marker:'';
     };
     const userTurns=[...document.querySelectorAll('[data-message-author-role="user"]')];
     const userMatch=userTurns.some(el=>nonEditableText(el).includes(marker));

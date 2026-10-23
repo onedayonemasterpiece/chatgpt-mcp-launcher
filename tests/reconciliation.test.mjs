@@ -115,25 +115,42 @@ test('late real model report after unreadable reconciliation resolves only deliv
 const driver=await readFile(new globalThis.URL('../extension/page-driver.js',import.meta.url),'utf8');
 function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,
-                  mainEditable='',userEditable=''}={}) {
+                  mainEditable='',userEditable='',mainHidden='',userHidden=''}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
     innerText:draft,textContent:draft,isConnected:true,
     getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null};
-  // main.innerText includes the UNSENT contenteditable's text, exactly as Chrome
-  // does. The clone used by the safe proof removes editable descendants.
-  const node=(ordinary,editable='')=>({
-    innerText:ordinary+editable,textContent:ordinary+editable,
-    matches:()=>false,
-    cloneNode(){
-      let text=ordinary+editable;
-      return {
-        get innerText(){return text;},get textContent(){return text;},
-        querySelectorAll:()=>editable?[{remove(){text=ordinary;}}]:[]
-      };
-    }
+  const editableSelector='[contenteditable],textarea,input,[role="textbox"],[role="searchbox"]';
+  const rect=hidden=>hidden?{width:0,height:0}:{width:300,height:40};
+  const leaf=(value,{hidden=false,editable=false}={})=>({
+    innerText:value,textContent:value,isConnected:true,children:[],
+    matches:selector=>editable&&selector===editableSelector,
+    getBoundingClientRect:()=>rect(hidden),
+    hiddenInFixture:hidden,querySelectorAll:()=>[]
   });
-  const mainNode=node(main,mainEditable);
-  const userNode=node(user,userEditable);
+  const node=(ordinary,editable='',hidden='')=>{
+    const parts=[
+      ...(ordinary?[leaf(ordinary)]:[]),
+      ...(hidden?[leaf(hidden,{hidden:true})]:[]),
+      ...(editable?[leaf(editable,{editable:true})]:[])
+    ];
+    // Attached live innerText omits hidden text; a DETACHED clone's innerText
+    // falls back to textContent, which used to prove a false delivery.
+    return {
+      innerText:ordinary+editable,textContent:ordinary+editable+hidden,
+      children:parts,isConnected:true,
+      getBoundingClientRect:()=>rect(false),matches:()=>false,
+      querySelectorAll:selector=>selector===editableSelector?
+        parts.filter(el=>el.matches(editableSelector)):[],
+      cloneNode(){
+        let text=ordinary+editable+hidden;
+        return {get innerText(){return text;},get textContent(){return text;},
+          querySelectorAll:selector=>selector===editableSelector&&editable?
+            [{remove(){text=ordinary+hidden;}}]:[]};
+      }
+    };
+  };
+  const mainNode=node(main,mainEditable,mainHidden);
+  const userNode=node(user,userEditable,userHidden);
   const another=ambiguousComposer?{...editor}:null;
   const document={
     querySelectorAll(selector){
@@ -141,12 +158,12 @@ function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
         return ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
       if(selector==='[data-message-author-role="user"]')
-        return user||userEditable?[userNode]:[];
+        return user||userEditable||userHidden?[userNode]:[];
       return [];
     }
   };
   const context={document,window:{location:{href:wrongPage?'https://chatgpt.com/':URL},
-    getComputedStyle:()=>({visibility:'visible',display:'block'})},
+    getComputedStyle:el=>({visibility:'visible',display:el?.hiddenInFixture?'none':'block'})},
     globalThis:null,URL:globalThis.URL,setTimeout:fn=>{queueMicrotask(fn);return 1;}};
   context.globalThis=context;
   runInNewContext(driver,context,{timeout:2000});
@@ -181,6 +198,28 @@ test('unrecognized or ambiguous composer and marker only in unsent contenteditab
     assert.equal(result.evidence_kind,'unconfirmed');
     assert.ok(!JSON.stringify(result).includes('Visible unrelated text'));
   }
+});
+test('hidden noneditable marker is never delivery evidence; visible marker still proves delivery',async()=>{
+  const marker='job_id='+ID;
+  // Root re-review reproduction: LIVE main.innerText is empty but detached
+  // clone's innerText/textContent contains a hidden non-editable marker.
+  for(const sample of [
+    {mainHidden:marker},
+    {userHidden:marker},
+    {mainHidden:marker,mainEditable:'a different unsent draft'},
+    {mainHidden:marker,mainEditable:marker},
+    {mainHidden:marker,unknownComposer:true}
+  ]) {
+    const result=await inspect(sample);
+    assert.equal(result.delivery_evidence,'unknown',JSON.stringify(sample));
+    assert.equal(result.evidence_kind,'unconfirmed');
+  }
+  const shown=await inspect({main:'Visible delivered message job_id='+ID});
+  assert.equal(shown.delivery_evidence,'sent','rendered marker outside editor stays valid');
+  assert.equal(shown.evidence_kind,'conversation_marker');
+  const user=await inspect({user:'Visible user turn job_id='+ID});
+  assert.equal(user.delivery_evidence,'sent','rendered user turn remains valid');
+  assert.equal(user.evidence_kind,'user_message_marker');
 });
 test('marker only in unsent editor, absent content or unrendered page is NEVER sent evidence',async()=>{
   for(const sample of [{main:'',draft:'job_id='+ID},
