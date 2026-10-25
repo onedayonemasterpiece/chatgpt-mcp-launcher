@@ -8,7 +8,7 @@ const CHAT='https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const OTHER='https://chatgpt.com/c/11111111-2222-3333-4444-555555555555';
 
 function fixture(openTabs=[],opts={}) {
-  const calls={created:[],updated:[],windows:[],injections:[],reloads:[]};
+  const calls={created:[],updated:[],windows:[],injections:[],reloads:[],delays:[]};
   const tabs=new Map(openTabs.map(t=>[t.id,{status:'complete',windowId:1,...t}]));
   let newTabId=100;
   let reads=0;
@@ -51,8 +51,10 @@ function fixture(openTabs=[],opts={}) {
       }}];
     }},
   };
-  const sandbox={chrome,URL,Date,Number,AbortController,
-    setTimeout:opts.instantTimers ? (cb)=>{Promise.resolve().then(cb);return 1;} : setTimeout,
+  const random=Object.create(Math);
+  if(opts.random!==undefined) random.random=()=>opts.random;
+  const sandbox={chrome,URL,Date,Number,Math:random,AbortController,
+    setTimeout:(cb,ms)=>{calls.delays.push(ms);Promise.resolve().then(cb);return 1;},
     clearTimeout,fetch:async()=>{throw Error('Unexpected fetch')}};
   runInNewContext(source,sandbox,{filename:'background.js',timeout:2000});
   return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads};
@@ -77,6 +79,17 @@ test('continue opens target conversation without navigating an unrelated open ch
   assert.equal(f.calls.created.length,1);
   assert.equal(f.calls.created[0].url,CHAT);
   assert.deepEqual(f.calls.injections,[100,100]);
+});
+
+test('start and continue wait a varied few seconds after opening or focusing a chat',async()=>{
+  for(const [random,expected] of [[0,1500],[0.5,2500],[0.9999,3500]]) {
+    const f=fixture([{id:21,url:CHAT}],{random});
+    await f.execute({action:'continue',chat_url:CHAT,prompt:'Continue'});
+    assert.deepEqual(f.calls.delays,[expected]);
+  }
+  const f=fixture([],{random:0.5});
+  await f.execute({action:'start',prompt:'New conversation'});
+  assert.deepEqual(f.calls.delays,[2500]);
 });
 
 test('open-only reuses existing conversation and never touches composer or Send button',async()=>{
@@ -141,7 +154,7 @@ test('start reuses an already open empty New chat tab',async()=>{
 });
 
 test('start falls back to a fresh tab when the open New chat tab holds a draft',async()=>{
-  const f=fixture([{id:32,url:HOME}],{driverResults:[
+  const f=fixture([{id:32,url:HOME}],{random:0.5,driverResults:[
     {status:'blocked',reason:'draft',message:'An unsent draft already exists; not overwriting it'},
     {status:'sent',chat_url:CHAT,message:'New chat created via Send button.'}]});
   const result=await f.execute({action:'start',prompt:'New conversation',effort:'auto'});
@@ -149,6 +162,7 @@ test('start falls back to a fresh tab when the open New chat tab holds a draft',
   assert.equal(f.calls.created.length,1);
   assert.equal(f.calls.created[0].url,HOME);
   assert.deepEqual(f.calls.injections,[32,32,100,100]);
+  assert.deepEqual(f.calls.delays,[2500,2500]);
 });
 
 test('Frame 0 removed after Send is recovered only from a matching read-only job marker',async()=>{

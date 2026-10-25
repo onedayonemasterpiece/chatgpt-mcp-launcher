@@ -136,6 +136,12 @@ async function awaitTab(tabId) {
   }
   throw new Error('ChatGPT page did not open within 90 seconds');
 }
+async function waitAfterOpening() {
+  // Give the newly opened or focused chat a short, varied settling interval
+  // before the page driver starts interacting with it.
+  const ms=1500+Math.floor(Math.random()*2001);
+  await new Promise(resolve=>setTimeout(resolve,ms));
+}
 function validChatUrl(url) {
   try {const u=new URL(url);return u.origin==='https://chatgpt.com' && /^\/(?:g\/[^/]+\/)?c\/[a-z0-9-]+\/?$/i.test(u.pathname) && !u.search && !u.hash;}
   catch {return false;}
@@ -227,6 +233,7 @@ async function execute(job) {
     message:'ChatGPT tab opened or reused; no prompt submitted or model response read'};
   const script=driverScript();
   let result;
+  if(job.action==='start'||job.action==='continue') await waitAfterOpening();
   try { result=await runDriver(script,tab,{...job,prompt}); }
   catch(err) {
     // A single Send click can navigate/unmount Chrome's execution frame before
@@ -250,6 +257,7 @@ async function execute(job) {
     // there, so start once more in a fresh tab instead of blocking.
     const fresh=await openChatTab(job,{fresh:true});
     await awaitTab(fresh.id);
+    await waitAfterOpening();
     result=await runDriver(script,fresh,{...job,prompt});
   }
   if(!result?.result||typeof result.result.status!=='string')throw Error('Missing browser action result');
