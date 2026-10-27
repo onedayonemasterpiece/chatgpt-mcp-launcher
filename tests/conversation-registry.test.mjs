@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {FileQueue} from '../relay/queue.mjs';
+import {FileQueue,callbackFooter} from '../relay/queue.mjs';
 import {canonicalChatUrl,chatIdFromUrl,referenceToUrl} from '../relay/conversations.mjs';
 
 const ID='6ad89e0c-b984-83ea-88ba-dd29b57ee40b';
@@ -188,7 +188,7 @@ test('ChatGPT confirms through MCP: started resolves uncertainty, done carries t
   const task=await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'});
   const claimed=await q.claim('desktop');
   assert.ok(claimed.prompt.includes('job_id='+task.id));
-  assert.ok(!claimed.prompt.includes('\n')&&claimed.prompt.length<'ping'.length+260,'one short line');
+  assert.ok(!claimed.prompt.includes('\n')&&claimed.prompt==='ping'+callbackFooter(task.id),'one line with the exact footer');
   assert.equal(claimed.mention,'Chatgpt task lancher','the extension mentions the app itself');
   assert.equal((await q.enqueue({action:'start',prompt:'ping',request_id:'cb-1'})).id,task.id,'footer does not break idempotency');
   await q.report('desktop',{job_id:task.id,status:'needs_review',message:'not verified'});
