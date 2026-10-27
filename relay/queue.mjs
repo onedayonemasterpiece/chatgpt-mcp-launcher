@@ -69,8 +69,9 @@ const iso = ms => ms ? new Date(ms).toISOString() : null;
 // The ChatGPT app (this MCP server) as it is named in the owner's ChatGPT.
 export const APP_NAME = 'Chatgpt task lancher';
 export function callbackFooter(jobId) {
-  // One short line; the extension then mentions the app itself (job.mention).
-  return ' (Служебное: сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
+  // The extension then mentions the app itself (job.mention).
+  return ' (Служебное: Если задача — изменение кода: перед планом прочитай и соблюдай https://github.com/onedayonemasterpiece/codex-devcoveer-mcp/blob/main/skills/devserver-simplicity/SKILL.md; '+
+    'сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
 

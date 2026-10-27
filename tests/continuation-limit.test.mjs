@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {FileQueue} from '../relay/queue.mjs';
+import {FileQueue,callbackFooter} from '../relay/queue.mjs';
 
 const ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const NEW='11111111-2222-3333-4444-555555555555';
 const URL='https://chatgpt.com/c/'+ID;
 const NEW_URL='https://chatgpt.com/c/'+NEW;
 const TOKEN='test-device-token';
+
+test('callback footer points to the shared code-change simplicity skill',()=>{
+  assert.ok(callbackFooter(ID).includes('https://github.com/onedayonemasterpiece/codex-devcoveer-mcp/blob/main/skills/devserver-simplicity/SKILL.md'));
+});
 async function setup(t,options={}) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-limit-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
