@@ -478,7 +478,10 @@
     const asked=(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
     let probe=null;
     try {probe=domProbe();} catch {}
+    let state=null;
+    try {state=pageState(job);} catch {}
     return {status:'read',chat_url:chatUrl(),reply_text:text ? text.slice(0,20000) : null,reply_generating:busy,dom_probe:probe,
+      page_state:state,
       last_user_text:asked ? asked.slice(0,2000) : null,
       message:!text ? (document.querySelectorAll('[data-message-author-role]').length ? 'No ChatGPT reply in this conversation yet' :
         'The conversation text is not readable on this page (ChatGPT markup); rely on model_status/model_summary from chatgpt_report') :
