@@ -113,6 +113,36 @@ test('late real model report after unreadable reconciliation resolves only deliv
 });
 
 const driver=await readFile(new globalThis.URL('../extension/page-driver.js',import.meta.url),'utf8');
+test('read exposes categorical page state even when conversation messages are unreadable',async()=>{
+  for (const banner of ['Connection lost','Соединение прервано','']) {
+    const editor={id:'prompt-textarea',innerText:'private unsent draft',isConnected:true,
+      getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,
+      getAttribute:()=>null,closest:()=>null};
+    const stop={isConnected:true,getBoundingClientRect:()=>({width:30,height:30})};
+    const document={body:{innerText:banner+' private conversation content'},
+      querySelectorAll(selector){
+        if(selector==='[contenteditable="true"],textarea')return [editor];
+        if(selector.includes('stop-button'))return [stop];
+        return [];
+      },
+      execCommand(){throw Error('read must never type');}};
+    const context={document,window:{location:{href:URL},
+      getComputedStyle:()=>({visibility:'visible',display:'block'})},URL:globalThis.URL,
+      setTimeout:fn=>{queueMicrotask(fn);return 1;}};
+    context.globalThis=context;
+    runInNewContext(driver,context,{timeout:2000});
+    const result=await context.chatGPTLauncherRead({action:'read'});
+    assert.equal(result.status,'read');
+    assert.equal(result.reply_text,null);
+    assert.equal(result.reply_generating,true,'Stop is an observation, not a completed job');
+    assert.equal(result.page_state.connection_lost,!!banner);
+    assert.equal(result.page_state.composer,'present');
+    assert.equal(result.page_state.composer_text,'other_draft');
+    assert.equal(result.page_state.user_messages,0);
+    assert.equal(result.page_state.assistant_messages,0);
+    assert.equal(JSON.stringify(result).includes('private'),false);
+  }
+});
 function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden=''}={}) {
