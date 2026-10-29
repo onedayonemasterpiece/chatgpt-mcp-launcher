@@ -95,6 +95,7 @@ function nextStep(job) {
         'Pass that exact question to the owner now (do not just wait), then pause the coordination with that reason.';
       if(job.model_status==='done') return 'ChatGPT finished: model_summary holds its own short result.';
       if(job.model_status==='failed') return 'ChatGPT reported it could not do the task: see model_summary.';
+      if(job.page_completed_at) return 'A completed answer for this exact job was observed in the ChatGPT page. The model did not report done; continuation in this chat is now allowed.';
       if(job.model_status==='started') return 'ChatGPT confirmed it started working. Check chatgpt_task_status again in a few minutes for model_status = done.';
       return 'Delivered. ChatGPT has been asked to confirm via MCP (model_status started, then done with model_summary). Check chatgpt_task_status again in about a minute.';
     case 'closed':
@@ -104,8 +105,10 @@ function nextStep(job) {
     case 'refreshed':
       return 'ChatGPT refreshed the plugin tools; message says what the page showed. Check the new tools in a chat, then report in the coordination thread and to the owner.';
     case 'read':
-      if(job.reconcile_of) return job.reconcile_status==='sent' ?
-        'The specific prompt was confirmed in this conversation; see the original job for execution/model_status (not inferred done).' :
+      if(job.reconcile_of) return job.reconcile_evidence==='page_completed' ?
+        'A completed assistant reply after the exact job marker was observed. The original job is page_completed, NOT model done; continuation is allowed.' :
+        job.reconcile_status==='sent' ?
+        'Delivery is confirmed, but execution is not proven complete. Inspect the original job before continuing.' :
         job.reconcile_status==='blocked' ? 'The original prompt was proven unsent; it may now be retried using chatgpt_retry(original job_id).' :
         'No decisive delivery evidence was found. The original job remains needs_review; never blind retry or hand off.';
       if(job.reply_generating) return 'ChatGPT is still writing. Call chatgpt_read_reply again in about 30 seconds.';
@@ -361,8 +364,9 @@ export class FileQueue {
           return {...this.#public(receipt.job),archived:true};
         }
       }
-      if(action==='reconcile' && reviewSource.status!=='needs_review')
-        throw Error('Original job is no longer needs_review; inspect its current status instead');
+      if(action==='reconcile' && reviewSource.status!=='needs_review' &&
+        !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
+        throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
       this.#expire(this.now());
       // A repeated read-only verification never creates another Chrome action
       // while an earlier verification of the same uncertain job is pending.
@@ -523,10 +527,11 @@ export class FileQueue {
       execution:this.#execution(job),next_step:nextStep(job)};
   }
   // What is known about the work itself, separate from delivery of the prompt.
-  // Only real reports from the agent count; silence is reported as such.
+  // Page-observed completion is distinct from ChatGPT's own model report.
   #execution(job,now=this.now()) {
     if(job.action!=='start'&&job.action!=='continue') return null;
     if(MODEL_FINAL.includes(job.model_status)) return job.model_status;
+    if(job.page_completed_at) return 'page_completed';
     if(job.model_status==='started'||job.model_status==='progress') {
       return now-Date.parse(job.model_last_report_at||job.model_started_at)>this.silenceMs ? 'unconfirmed' : job.model_status;
     }
@@ -903,9 +908,10 @@ export class FileQueue {
         const proof=data.delivery_evidence==='sent' &&
           ['user_message_marker','conversation_marker'].includes(data.evidence_kind) &&
           job.status==='read' && url===job.chat_url &&
-          source?.status==='needs_review' &&
+          ['needs_review','sent'].includes(source?.status) &&
           (source.delivery_action!=='start'||url!==source.previous_chat_url);
-        if(proof) {
+        const recovered=proof&&source.status==='needs_review';
+        if(recovered) {
           source.status='sent';
           source.timed_out=false;
           source.reported_at=source.reported_at||job.reported_at;
@@ -913,10 +919,19 @@ export class FileQueue {
           source.result_chat_url=url;
           this.#markDelivered(source); // once, on the original job only
           this.#recordChat(url,deviceId,source.id,'sent');
-          this.#notifyJob(source,'reconciled');
         }
+        // A user turn bearing THIS job marker, followed by a completed assistant
+        // turn, proves execution on the page, not a model-reported done.
+        const completed=proof && data.evidence_kind==='user_message_marker' &&
+          data.execution_evidence==='page_completed' &&
+          !MODEL_FINAL.includes(source.model_status) && !source.page_completed_at;
+        if(completed) {
+          source.page_completed_at=job.reported_at;
+          source.message='Completed assistant answer observed after this job marker';
+          this.#notifyJob(source,'page_completed');
+        } else if(recovered) this.#notifyJob(source,'reconciled');
         job.reconcile_status=source?.status||'unknown';
-        job.reconcile_evidence=proof?data.evidence_kind:'unconfirmed';
+        job.reconcile_evidence=completed?'page_completed':recovered?data.evidence_kind:'unconfirmed';
       }
       // A continue that could not be delivered must not lose the line of work:
       // start the same prompt in a new chat right away (owner decision, 22 Oct).

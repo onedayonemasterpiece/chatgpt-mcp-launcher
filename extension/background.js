@@ -305,6 +305,7 @@ async function execute(job) {
     out.delivery_evidence=result.result.delivery_evidence==='sent'?'sent':'unknown';
     out.evidence_kind=['user_message_marker','conversation_marker'].includes(result.result.evidence_kind)?
       result.result.evidence_kind:'unconfirmed';
+    out.execution_evidence=result.result.execution_evidence==='page_completed'?'page_completed':'unknown';
   }
   if(job.action==='read') {
     out.reply_text=typeof result.result.reply_text==='string' ? result.result.reply_text.slice(0,20000) : null;
@@ -316,8 +317,8 @@ async function execute(job) {
 async function flushPending(config) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
-  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind}=pendingReport;
-  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind});}
+  const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind,execution_evidence}=pendingReport;
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind,execution_evidence});}
   catch(err) {
     // A report the relay refuses outright would be resent forever and block
     // heartbeats and every later job. Network errors and 401 stay pending.

@@ -9,11 +9,11 @@ import {FileQueue} from '../relay/queue.mjs';
 const ID='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const URL='https://chatgpt.com/c/'+ID;
 const KEY='test-'+'x'.repeat(32);
-async function setup(t) {
+async function setup(t,options={}) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-reconcile-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const file=join(dir,'queue.json');
-  const q=new FileQueue(file,{desktop:KEY});
+  const q=new FileQueue(file,{desktop:KEY},options);
   await q.initialize();
   return {q,file};
 }
@@ -112,6 +112,68 @@ test('late real model report after unreadable reconciliation resolves only deliv
   assert.equal(q.status(original.id).continuation_count,1);
 });
 
+test('terminal reply evidence persists on the original sent job and permits safe continuation',async t=>{
+  let now=Date.now();
+  const {q,file}=await setup(t,{now:()=>now,confirmMs:1});
+  const opening=await q.enqueue({action:'start',prompt:'opening'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:opening.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:opening.id,status:'done'});
+  const original=await q.enqueue({action:'continue',chat_ref:ID,prompt:'work item'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:original.id,status:'sent',chat_url:URL});
+  now+=2;
+  assert.equal(q.status(original.id).execution,'unconfirmed');
+  await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,prompt:'too early'}),/unconfirmed/i);
+  const check=await q.reconcile(original.id,'terminal-check');
+  await q.claim('desktop');
+  const result=await q.report('desktop',{job_id:check.id,status:'read',chat_url:URL,
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  assert.equal(result.reconcile_evidence,'page_completed');
+  const observed=q.status(original.id);
+  assert.equal(observed.status,'sent');
+  assert.equal(observed.execution,'page_completed');
+  assert.ok(observed.page_completed_at);
+  assert.equal(observed.model_status,undefined,'page proof cannot fabricate a model report');
+  assert.equal(observed.continuation_count,1);
+  assert.equal((await q.reconcile(original.id,'terminal-check')).id,check.id,'same reconciliation is idempotent');
+  assert.equal(q.status(original.id).page_completed_at,observed.page_completed_at);
+  const following=await q.enqueue({action:'continue',chat_ref:ID,prompt:'next work item'});
+  assert.equal(following.status,'queued');
+  const reload=new FileQueue(file,{desktop:KEY},{now:()=>now,confirmMs:1});
+  await reload.initialize();
+  assert.equal(reload.status(original.id).execution,'page_completed');
+  assert.equal(reload.status(original.id).page_completed_at,observed.page_completed_at);
+  await reload.modelReport({job_id:original.id,status:'done',summary:'actual model receipt'});
+  assert.equal(reload.status(original.id).execution,'done','late model report takes precedence');
+  assert.equal(reload.status(original.id).page_completed_at,observed.page_completed_at);
+});
+
+test('no exact user marker or unfinished assistant answer cannot clear unconfirmed execution',async t=>{
+  let now=Date.now();
+  const {q}=await setup(t,{now:()=>now,confirmMs:1});
+  const opening=await q.enqueue({action:'start',prompt:'opening'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:opening.id,status:'sent',chat_url:URL});
+  await q.modelReport({job_id:opening.id,status:'done'});
+  const original=await q.enqueue({action:'continue',chat_ref:ID,prompt:'work item'});
+  await q.claim('desktop');
+  await q.report('desktop',{job_id:original.id,status:'sent',chat_url:URL});
+  now+=2;
+  for(const [i,evidence] of [
+    {delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'unknown'},
+    {delivery_evidence:'unknown',evidence_kind:'unconfirmed',execution_evidence:'page_completed'},
+    {delivery_evidence:'sent',evidence_kind:'conversation_marker',execution_evidence:'page_completed'},
+  ].entries()) {
+    const check=await q.reconcile(original.id,'negative-'+i);
+    await q.claim('desktop');
+    await q.report('desktop',{job_id:check.id,status:'read',chat_url:URL,...evidence});
+    assert.equal(q.status(original.id).execution,'unconfirmed');
+    assert.equal(q.status(original.id).page_completed_at,undefined);
+    await assert.rejects(q.enqueue({action:'continue',chat_ref:ID,prompt:'unsafe'}),/unconfirmed/i);
+  }
+});
+
 const driver=await readFile(new globalThis.URL('../extension/page-driver.js',import.meta.url),'utf8');
 test('read exposes categorical page state even when conversation messages are unreadable',async()=>{
   for (const banner of ['Connection lost','Соединение прервано','']) {
@@ -143,7 +205,7 @@ test('read exposes categorical page state even when conversation messages are un
     assert.equal(JSON.stringify(result).includes('private'),false);
   }
 });
-function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
+function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden=''}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
@@ -181,6 +243,9 @@ function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
   };
   const mainNode=node(main,mainEditable,mainHidden);
   const userNode=node(user,userEditable,userHidden);
+  userNode.getAttribute=name=>name==='data-message-author-role'?'user':null;
+  const assistantNode=node(assistant);
+  assistantNode.getAttribute=name=>name==='data-message-author-role'?'assistant':null;
   const another=ambiguousComposer?{...editor}:null;
   const document={
     querySelectorAll(selector){
@@ -189,6 +254,9 @@ function inspect({main='',user='',draft='',wrongPage=false,noMain=false,
       if(selector==='main')return noMain?[]:[mainNode];
       if(selector==='[data-message-author-role="user"]')
         return user||userEditable||userHidden?[userNode]:[];
+      if(selector==='[data-message-author-role="user"],[data-message-author-role="assistant"]')
+        return [...(user||userEditable||userHidden?[userNode]:[]),...(assistant?[assistantNode]:[])];
+      if(selector.includes('stop-button'))return generating?[{isConnected:true,getBoundingClientRect:()=>rect(false)}]:[];
       return [];
     }
   };
@@ -251,6 +319,25 @@ test('hidden noneditable marker is never delivery evidence; visible marker still
   assert.equal(user.delivery_evidence,'sent','rendered user turn remains valid');
   assert.equal(user.evidence_kind,'user_message_marker');
 });
+test('browser proves terminal execution only with exact user turn, later answer and stopped generation',async()=>{
+  const marker='job_id='+ID;
+  const completed=await inspect({user:'Prompt '+marker,assistant:'Finished answer'});
+  assert.equal(completed.delivery_evidence,'sent');
+  assert.equal(completed.execution_evidence,'page_completed');
+  for(const sample of [
+    {user:'Prompt '+marker,assistant:'Partial answer',generating:true},
+    {user:'Prompt '+marker,assistant:''},
+    {main:'Page contains '+marker,assistant:'Unrelated assistant answer'},
+    {user:'No target marker',assistant:'Finished answer'},
+    {user:'Prompt '+marker,assistant:'Finished answer',wrongPage:true},
+    {userEditable:marker,assistant:'Finished answer'}
+  ]) {
+    const result=await inspect(sample);
+    assert.equal(result.execution_evidence,'unknown',JSON.stringify(sample));
+  }
+  assert.equal(JSON.stringify(completed).includes('Finished answer'),false,'no page text returned');
+});
+
 test('marker only in unsent editor, absent content or unrendered page is NEVER sent evidence',async()=>{
   for(const sample of [{main:'',draft:'job_id='+ID},
     {main:'job_id='+ID,draft:'job_id='+ID},
