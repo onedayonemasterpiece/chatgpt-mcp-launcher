@@ -73,6 +73,10 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
+    name:'chatgpt_refresh_plugin_tools',description:'After a deploy that adds or changes MCP tools: open the owner\'s ChatGPT plugin settings page, press "Refresh tools", wait for it to finish and close the tab. Sends nothing to any chat. Then verify the new tools in a chat and report in the coordination thread and to the owner.',
+    inputSchema:{type:'object',properties:{plugin_url:{type:'string',description:'https://chatgpt.com/settings/plugins-settings/plugin_<id> of the plugin to refresh.'},...COMMON},required:['plugin_url'],additionalProperties:false},
+  },
+  {
     name:'chatgpt_coordination_set',description:'Optional reminder for a coordinator: open or update the coordination of a complex piece of work. While it is open and fewer than min_agents agents report started/progress for longer than idle_minutes, a chatgpt_launcher.coordination_reminder event is sent. It never starts agents. Pause with pause_minutes + pause_reason (0 ends the pause). Returns the current state.',
     inputSchema:{type:'object',properties:{goal:{type:'string',maxLength:500,description:'What is being coordinated (required when opening).'},
       min_agents:{type:'integer',minimum:1,maximum:20,description:'Default 2.'},idle_minutes:{type:'number',minimum:1,maximum:240,description:'Default 15.'},
@@ -218,6 +222,8 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
             } else if (name==='chatgpt_retry') {
               if(!args.job_id) throw new Error('job_id is required');
               value=await queue.retry(args.job_id,args.request_id);
+            } else if (name==='chatgpt_refresh_plugin_tools') {
+              value=await queue.enqueue({...args,action:'refresh_tools'});
             } else if (name==='chatgpt_close_chat') {
               value=await queue.enqueue({...args,action:'close'});
             } else if (name==='chatgpt_report') {

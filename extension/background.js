@@ -222,7 +222,43 @@ async function closeChat(job,script) {
   return {status:'closed',chat_url:job.chat_url,
     message:`Closed ${closed} tab(s)`+(kept.length?`; left open: ${kept.join(', ')}`:'')};
 }
+function validPluginUrl(url) {
+  try {const u=new URL(url);return u.origin==='https://chatgpt.com' && /^\/settings\/plugins-settings\/plugin_[a-z0-9_]+$/i.test(u.pathname) && !u.search && !u.hash;}
+  catch {return false;}
+}
+// Runs inside the plugin settings page: press "Refresh tools" once and wait
+// until ChatGPT re-enables the button (about 10 s on average).
+async function pressRefreshTools() {
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  const label=/^(обновить инструменты|refresh tools|update tools)$/i;
+  const find=()=>[...document.querySelectorAll('button')].find(b=>label.test((b.textContent||'').trim()));
+  let button=null;
+  for(let i=0;i<60&&!button;i++){button=find();if(!button)await sleep(500);}
+  if(!button) return {status:'blocked',message:'Refresh tools button not found on the plugin page; nothing was pressed'};
+  button.click();
+  await sleep(10000);
+  for(let i=0;i<40;i++){
+    const b=find();
+    if(b&&!b.disabled&&b.getAttribute('aria-busy')!=='true') break;
+    await sleep(500);
+  }
+  const notes=[...document.querySelectorAll('[role="alert"],[role="status"]')]
+    .map(n=>(n.textContent||'').trim()).filter(Boolean).join(' | ').slice(0,300);
+  return {status:'refreshed',message:'Refresh tools pressed and finished'+(notes?': '+notes:'')};
+}
+async function refreshPluginTools(job) {
+  if(!validPluginUrl(job.chat_url))throw Error('Invalid ChatGPT plugin settings URL');
+  const tab=await chrome.tabs.create({url:job.chat_url,active:true});
+  if(Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId,{focused:true});
+  await awaitTab(tab.id);
+  const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:pressRefreshTools,args:[{action:'refresh_tools'}]});
+  const out=result?.result&&typeof result.result.status==='string'?result.result:
+    {status:'needs_review',message:'No result from the plugin page; check whether tools were refreshed'};
+  if(out.status==='refreshed') await chrome.tabs.remove(tab.id);
+  return {status:out.status,chat_url:null,message:out.message||''};
+}
 async function execute(job) {
+  if(job.action==='refresh_tools') return refreshPluginTools(job);
   if(!['start','continue','open','read','close','reconcile'].includes(job.action))throw Error('Unsupported browser action');
   const prompt=['open','read','close','reconcile'].includes(job.action)?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
