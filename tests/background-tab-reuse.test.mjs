@@ -241,3 +241,14 @@ test('close-chat with no open tab is simply done',async()=>{
   assert.equal(result.status,'closed');
   assert.match(result.message,/No open tab/);
 });
+
+test('refresh_tools opens the plugin settings page, presses once and closes the tab',async()=>{
+  const PLUGIN='https://chatgpt.com/settings/plugins-settings/plugin_asdk_app_6ac1800f87d081918bf59ecffa242499';
+  const f=fixture([{id:21,url:CHAT}],{driverResults:[{status:'refreshed',message:'Refresh tools pressed and finished'}]});
+  const result=await f.execute({action:'refresh_tools',chat_url:PLUGIN,id:'refresh-job'});
+  assert.equal(result.status,'refreshed');
+  assert.equal(result.chat_url,null);
+  assert.deepEqual(f.calls.created.map(c=>c.url),[PLUGIN]);
+  assert.deepEqual(f.calls.removed,[100],'only the plugin tab is closed, never a chat');
+  await assert.rejects(f.execute({action:'refresh_tools',chat_url:CHAT,id:'bad'}),/plugin settings URL/);
+});

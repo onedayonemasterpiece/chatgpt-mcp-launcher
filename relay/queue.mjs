@@ -5,11 +5,13 @@ import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} fr
 import {DeliveryError,EVENT_DEFINITIONS,JOB_EVENT,REMINDER_EVENT,eventId,subscriptionId,validSecret} from './events.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
-const REPORT_STATES = ['sent','opened','read','closed','blocked','failed','needs_review'];
+const REPORT_STATES = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review'];
 const MAX_REPLY = 20_000;
 // No job may stay "in progress" forever: after this long it gets a final status.
 const STALE_MS = 15 * 60_000;
-const TERMINAL = ['sent','opened','read','closed','blocked','failed','needs_review','expired'];
+const TERMINAL = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review','expired'];
+// Owner's ChatGPT plugin (MCP app) settings page; refresh_tools clicks its "Refresh tools" button.
+const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_[a-z0-9_]+$/i;
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
@@ -99,6 +101,8 @@ function nextStep(job) {
       return 'The tab is closed to save memory. The conversation itself stays in ChatGPT: chatgpt_continue with this chat_id reopens it.';
     case 'opened':
       return 'The conversation is open in Chrome. Nothing was sent.';
+    case 'refreshed':
+      return 'ChatGPT refreshed the plugin tools; message says what the page showed. Check the new tools in a chat, then report in the coordination thread and to the owner.';
     case 'read':
       if(job.reconcile_of) return job.reconcile_status==='sent' ?
         'The specific prompt was confirmed in this conversation; see the original job for execution/model_status (not inferred done).' :
@@ -309,8 +313,10 @@ export class FileQueue {
   async enqueue(args) {
     return this.#run(async()=>{
       const action=args.action;
-      if(!['start','continue','open','read','close','reconcile'].includes(action))throw Error('Invalid action');
-      const noPrompt=['open','read','close','reconcile'].includes(action);
+      if(!['start','continue','open','read','close','reconcile','refresh_tools'].includes(action))throw Error('Invalid action');
+      const noPrompt=['open','read','close','reconcile','refresh_tools'].includes(action);
+      if(action==='refresh_tools' && !PLUGIN_URL.test(args.plugin_url||''))
+        throw Error('plugin_url must be https://chatgpt.com/settings/plugins-settings/plugin_<id>');
       const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
@@ -323,11 +329,13 @@ export class FileQueue {
         throw Error('Reconciliation requires an existing start/continue job; no state was changed');
       const hasUrl=typeof args.chat_url==='string'&&args.chat_url.trim().length>0;
       const hasRef=typeof args.chat_ref==='string'&&args.chat_ref.trim().length>0;
-      if(!['start','reconcile'].includes(action) && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
+      if(!['start','reconcile','refresh_tools'].includes(action) && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
       let target=null;
       if(action==='reconcile') {
         target=canonicalChatUrl(reviewSource.result_chat_url||reviewSource.chat_url);
         if(!target) throw Error('No verified conversation URL for read-only reconciliation; keep needs_review');
+      } else if(action==='refresh_tools') {
+        target=args.plugin_url;
       } else if(action!=='start') {
         target=hasUrl?canonicalChatUrl(args.chat_url):this.resolveChat(args.chat_ref,deviceId);
         if(!target)throw Error('Unknown or invalid ChatGPT conversation reference. Pass the chat_id from chatgpt_task_status or chatgpt_list_chats, or a full https://chatgpt.com/c/... URL');
@@ -834,7 +842,8 @@ export class FileQueue {
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
       if(data.status==='read' && !['read','reconcile'].includes(job.action))throw Error('Only read jobs (or reconciliation) can report read');
       if(data.status==='closed' && job.action!=='close')throw Error('Only close jobs can report closed');
-      if(['open','read','close'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
+      if(data.status==='refreshed' && job.action!=='refresh_tools')throw Error('Only refresh_tools jobs can report refreshed');
+      if(['open','read','close','refresh_tools'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
       if(job.status!=='claimed' && !job.timed_out) {
         if(job.status===data.status) {

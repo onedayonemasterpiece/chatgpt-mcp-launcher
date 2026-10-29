@@ -66,3 +66,31 @@ test('MCP opens a slug without sending, lists it and continues it by slug',async
   assert.equal(listed.includes(DEVICE),false);
   assert.equal((await json('/device/report',{job_id:opened.id,status:'opened'},'none')).code,401);
 });
+
+test('MCP refreshes plugin tools on the owner page without touching any chat',async t=>{
+  const PLUGIN='https://chatgpt.com/settings/plugins-settings/plugin_asdk_app_6ac1800f87d081918bf59ecffa242499';
+  const dir=await mkdtemp(join(tmpdir(),'launcher-mcp-refresh-'));
+  const {server}=await makeRelay({file:join(dir,'queue.json'),mcpToken:TOKEN,devices:{desktop:DEVICE}});
+  await new Promise(done=>server.listen(0,'127.0.0.1',done));
+  t.after(async()=>{await new Promise(done=>server.close(done));await rm(dir,{recursive:true,force:true});});
+  const base='http://127.0.0.1:'+server.address().port;
+  const dev={Authorization:'Bearer '+DEVICE,'X-Launcher-Device-Id':'desktop','X-Launcher-Revision':REV,'Content-Type':'application/json'};
+  const post=async(path,body,headers=dev)=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined});return r.json();};
+  const call=async(name,args)=>JSON.parse((await post('/mcp',{jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},
+    {Authorization:'Bearer '+TOKEN,'Content-Type':'application/json'})).result.content[0].text);
+  assert.match((await call('chatgpt_refresh_plugin_tools',{plugin_url:'https://evil.example/plugin_x'})).error,/plugin_url/);
+  const job=await call('chatgpt_refresh_plugin_tools',{plugin_url:PLUGIN,request_id:'refresh-1'});
+  assert.equal(job.status,'queued');
+  assert.equal((await call('chatgpt_refresh_plugin_tools',{plugin_url:PLUGIN,request_id:'refresh-1'})).id,job.id);
+  await post('/device/report',{type:'heartbeat',schema_version:1,commands_enabled:true,active_revision:REV,installed_revision:REV,
+    runtime_integrity:'ok',manifest_version:'0.2.4',runtime_loaded_at:new Date().toISOString(),updater:{state:'current'}});
+  const claimed=(await post('/device/poll')).job;
+  assert.equal(claimed.action,'refresh_tools');
+  assert.equal(claimed.chat_url,PLUGIN);
+  assert.equal(claimed.prompt,null);
+  await post('/device/report',{job_id:job.id,status:'refreshed',message:'Refresh tools pressed and finished'});
+  const done=await call('chatgpt_task_status',{job_id:job.id});
+  assert.equal(done.status,'refreshed');
+  assert.match(done.next_step,/coordination thread and to the owner/);
+  assert.equal((await call('chatgpt_list_chats',{})).total,0,'a plugin page is never registered as a chat');
+});
