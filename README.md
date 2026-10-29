@@ -47,6 +47,10 @@ Disable scheduled updates with `schtasks.exe /Change /TN "ChatGPT MCP Launcher U
 
 Chrome must be open for an update to take effect; scheduled checks can run even while Chrome is closed. No prompts are resent automatically after an uncertain send.
 
+## Refreshing ChatGPT plugin tools after a deploy
+
+After a deploy that adds or changes MCP tools of a ChatGPT plugin (for RKB: «Kalinigrad base»), the deploying agent calls `chatgpt_refresh_plugin_tools` with the plugin settings URL `https://chatgpt.com/settings/plugins-settings/plugin_<id>`. Chrome opens that page, presses «Обновить инструменты» / «Refresh tools» once, waits until the button is ready again (about 10 s), closes the tab and reports `refreshed`. If the button is not found nothing is pressed (`blocked`); if it stays busy for 30 s the tab is left open (`needs_review`). No chat is touched. The agent then checks the new tools in an existing chat and reports in the coordination thread and to the owner.
+
 ## Security boundaries
 
 Only the Chrome device endpoints are exposed by the HTTPS proxy. MCP itself remains private. No API keys, passwords or cookies should ever be included in this repository. Source publication is separate from configuring the private relay and server infrastructure.
