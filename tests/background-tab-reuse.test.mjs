@@ -191,12 +191,13 @@ test('Frame 0 removed with an unreadable or mismatched conversation remains unkn
 
 test('a queued reconcile job performs no Send and forwards only boolean evidence',async()=>{
   const f=fixture([{id:38,url:CHAT}],{recoveryEvidence:{status:'read',chat_url:CHAT,
-    delivery_evidence:'sent',evidence_kind:'conversation_marker'}});
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'}});
   const out=await f.execute({action:'reconcile',chat_url:CHAT,
     verify_job_id:'6ed884fe-1026-4728-2017-d6c47282017a'});
   assert.equal(out.status,'read');
   assert.equal(out.delivery_evidence,'sent');
-  assert.equal(out.evidence_kind,'conversation_marker');
+  assert.equal(out.evidence_kind,'user_message_marker');
+  assert.equal(out.execution_evidence,'page_completed');
   assert.deepEqual(f.calls.injections,[38,38]);
   assert.deepEqual(f.calls.created,[]);
 });
