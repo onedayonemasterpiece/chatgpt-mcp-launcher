@@ -195,13 +195,23 @@ function driverScript() {
   return BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
 }
 async function runDriver(script,tab,payload) {
-  await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
-  const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
-    func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
-      payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
-      payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
-      globalThis.chatGPTLauncherRun(payload),args:[payload]});
-  return result;
+  const invoke=async()=>{
+    await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
+    const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
+      func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
+        payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+        payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
+        globalThis.chatGPTLauncherRun(payload),args:[payload]});
+    return result;
+  };
+  if(!['read','reconcile','probe'].includes(payload.action)) return invoke();
+  // Composer (90s) + history (60s) + settling (1s), with Chrome API headroom.
+  let timer;
+  try {
+    return await Promise.race([invoke(),new Promise((_,reject)=>{
+      timer=setTimeout(()=>reject(new Error('Read-only browser inspection timed out; no prompt submitted')),180000);
+    })]);
+  } finally {clearTimeout(timer);}
 }
 async function closeChat(job,script) {
   // Optional housekeeping: never close a tab holding someone's unsent draft

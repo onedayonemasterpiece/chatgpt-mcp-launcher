@@ -9,11 +9,13 @@ const OTHER='https://chatgpt.com/c/11111111-2222-3333-4444-555555555555';
 
 function fixture(openTabs=[],opts={}) {
   const calls={created:[],updated:[],windows:[],injections:[],reloads:[],delays:[]};
+  const state=opts.state||{}, deadlines=new Map();
+  let releaseScript;
   const tabs=new Map(openTabs.map(t=>[t.id,{status:'complete',windowId:1,...t}]));
   let newTabId=100;
   let reads=0;
   const chrome={
-    storage:{local:{get:async()=>({}),set:async()=>{}}},
+    storage:{local:{get:async()=>({...state}),set:async value=>Object.assign(state,value)}},
     alarms:{create:async()=>{},clear:async()=>{},onAlarm:{addListener:()=>{}}},
     runtime:{getURL:()=>'',reload:()=>{},onInstalled:{addListener:()=>{}},
       onStartup:{addListener:()=>{}},onMessage:{addListener:()=>{}}},
@@ -37,6 +39,7 @@ function fixture(openTabs=[],opts={}) {
     windows:{update:async(id,params)=>calls.windows.push({id,...params})},
     scripting:{executeScript:async(params)=>{
       calls.injections.push(params.target.tabId);
+      if(calls.injections.length===opts.hangAt) return new Promise(resolve=>{releaseScript=resolve;});
       if(params.files) return [];
       if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,answering:false}}];
       if(opts.frameRemovedOnce && !calls.frameRemoved && ['start','continue'].includes(params.args[0].action)) {
@@ -54,11 +57,63 @@ function fixture(openTabs=[],opts={}) {
   const random=Object.create(Math);
   if(opts.random!==undefined) random.random=()=>opts.random;
   const sandbox={chrome,URL,Date,Number,Math:random,AbortController,
-    setTimeout:(cb,ms)=>{calls.delays.push(ms);Promise.resolve().then(cb);return 1;},
-    clearTimeout,fetch:async()=>{throw Error('Unexpected fetch')}};
+    setTimeout:(cb,ms)=>{calls.delays.push(ms);if(ms===180000){const id={};deadlines.set(id,cb);return id;}Promise.resolve().then(cb);return 1;},
+    clearTimeout:id=>deadlines.delete(id),fetch:opts.fetch||async function(){throw Error('Unexpected fetch');}};
   runInNewContext(source,sandbox,{filename:'background.js',timeout:2000});
-  return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads};
+  return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads,
+    sandbox,state,deadlines,releaseScript:()=>releaseScript?.([]),
+    fireDeadline:()=>{assert.equal(deadlines.size,1);[...deadlines.values()][0]();}};
 }
+
+for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
+  test(`${action} Chrome call ${hangAt} timeout releases poll for later heartbeat`,async()=>{
+    const reports=[];
+    let delivered=false;
+    const job={action,id:'read-only-job',chat_url:CHAT};
+    const f=fixture([{id:21,url:CHAT}],{hangAt,
+      state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+      fetch:async(url,options)=>({ok:true,json:async()=>{
+        if(url.endsWith('/device/poll')){const next=delivered?null:job;delivered=true;return {job:next};}
+        const body=JSON.parse(options.body);reports.push(body);return {ok:true};
+      }}),
+    });
+    f.sandbox.runningVersion=async()=>({update_state:'current'});
+    const pending=f.sandbox.poll();
+    for(let i=0;i<100 && f.calls.injections.length<hangAt;i++) await Promise.resolve();
+    assert.equal(f.calls.injections.length,hangAt);
+    assert.equal((await f.sandbox.poll()).busy,true);
+    f.fireDeadline();
+    const result=await pending;
+    assert.equal(result.status,'needs_review');
+    assert.match(result.message,/read-only.*timed out/i);
+    assert.equal(f.state.pendingReport,null);
+    assert.equal(f.deadlines.size,0,'deadline timer cleaned up');
+    assert.equal(reports.filter(r=>r.type==='heartbeat').length,1);
+    assert.equal((await f.sandbox.poll()).idle,true);
+    assert.equal(reports.filter(r=>r.type==='heartbeat').length,2);
+    assert.equal(reports.filter(r=>r.job_id===job.id).length,1);
+    f.releaseScript();
+    for(let i=0;i<20;i++) await Promise.resolve();
+    assert.equal(reports.filter(r=>r.job_id===job.id).length,1,'late read does not resend or overwrite timeout report');
+  });
+}
+
+test('probe deadline bounds inspection while start/continue stay outside it',async()=>{
+  for(const action of ['probe','start','continue']) {
+    const f=fixture([{id:21,url:CHAT}],{hangAt:1});
+    const pending=f.sandbox.runDriver('page-driver.js',{id:21},{action,chat_url:CHAT});
+    await Promise.resolve();
+    if(action==='probe') {
+      f.fireDeadline();
+      await assert.rejects(pending,/read-only.*timed out/i);
+      assert.equal(f.deadlines.size,0);
+    } else {
+      assert.equal(f.deadlines.size,0,'prompt actions have no inspection timeout');
+      f.releaseScript();
+      assert.equal((await pending).result.status,'sent');
+    }
+  }
+});
 
 test('continue reuses matching open ChatGPT conversation and focuses its window',async()=>{
   const f=fixture([{id:21,url:CHAT+'/'}]);
