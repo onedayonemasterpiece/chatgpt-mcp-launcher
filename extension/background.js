@@ -287,8 +287,10 @@ async function execute(job) {
   if(job.action==='book_stop') {
     const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/*'}))
       .filter(t=>Number.isInteger(t.id)&&sameConversationUrl(t.url,job.chat_url));
-    if(tabs.length!==1)return {status:'blocked',chat_url:job.chat_url,message:'Exact active book tab not found'};
-    const observed=(await runDriver(driverScript(),tabs[0],job))?.result;
+    if(tabs.length>1)return {status:'blocked',chat_url:job.chat_url,message:'Exact book tab is ambiguous'};
+    const tab=tabs[0]||await openChatTab(job);
+    await awaitTab(tab.id);
+    const observed=(await runDriver(driverScript(),tab,job))?.result;
     if(!observed||!['stopped','read','blocked','needs_review'].includes(observed.status))
       return {status:'needs_review',chat_url:job.chat_url,message:'Book Stop result not confirmed'};
     return {status:observed.status,chat_url:observed.chat_url||null,message:observed.message||'',

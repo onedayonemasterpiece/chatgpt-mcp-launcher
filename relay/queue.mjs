@@ -219,6 +219,13 @@ export class FileQueue {
   #bookTurnStopped(job) {
     return this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id&&j.status==='stopped');
   }
+  #bookTurnComplete(job) {
+    return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookTurnStopped(job);
+  }
+  #unfinishedBookTurns(task) {
+    return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
+      ['start','continue'].includes(j.action)&&['claimed','sent','needs_review'].includes(j.status)&&!this.#bookTurnComplete(j));
+  }
   #bookSilent(task,job,now) {
     const activity=task.activity;
     const last=Date.parse(activity?.last_operation_at||'');
@@ -243,9 +250,8 @@ export class FileQueue {
           if(task.state!=='active'||task.device_id!==deviceId)return false;
           const job=this.#state.jobs.find(j=>j.id===task.job_id);
           if(!job)return true; // missing current turn cannot prove termination
-          if(!['claimed','sent','needs_review'].includes(job.status))return false;
           if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
-          return !(MODEL_FINAL.includes(job.model_status)||job.page_completed_at||this.#bookTurnStopped(job));
+          return this.#unfinishedBookTurns(task).length>0;
         });
         if(working)continue; // stop new book claims, finish already-issued turns
         cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
@@ -926,6 +932,8 @@ export class FileQueue {
           ['start','continue'].includes(j.action)&&j.status==='sent').map(j=>j.result_chat_url).filter(Boolean));
         for(const url of urls) {
           if(task.state==='active'&&url===current.result_chat_url)continue;
+          if(task.state==='active'&&history.some(j=>j.book_task_id===task.id&&j.result_chat_url===url&&
+            ['start','continue'].includes(j.action)&&!this.#bookTurnComplete(j)))continue;
           const previous=history.findLast(j=>j.action==='close'&&j.book_task_id===task.id&&j.chat_url===url);
           if(previous&&(['queued','claimed','closed'].includes(previous.status)||
             (previous.status==='blocked'&&previous.message?.includes('unsent draft'))))continue;
@@ -1024,19 +1032,22 @@ export class FileQueue {
       if(['queued','claimed'].includes(job.status))continue;
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
-      const complete=MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookTurnStopped(job);
+      const complete=this.#bookTurnComplete(job);
       const finished=runnable&&job.status==='sent'&&complete;
       // Silence permits an exact Stop attempt, never rest or a concurrent successor.
       const stale=this.#bookSilent(task,job,now);
       const silent=(stale&&!MODEL_FINAL.includes(job.model_status)&&!job.page_completed_at)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
-      if(stale&&!complete&&['sent','needs_review'].includes(job.status)) {
-        if(url&&!this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id)) {
+      const predecessor=this.#unfinishedBookTurns(task).find(j=>j.id!==job.id);
+      const writer=predecessor||job, stopUrl=writer.result_chat_url||writer.chat_url;
+      if(predecessor||stale&&!complete&&['sent','needs_review'].includes(job.status)) {
+        if(stopUrl&&this.#bookSilent(task,writer,now)&&
+            !this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===writer.id)) {
           try {
-            await this.#enqueue({action:'book_stop',chat_url:url,device_id:task.device_id,
-              after_job_id:job.id,book_task_id:task.id,book_index:task.index,
-              request_id:'book-stop-'+job.id,[BOOK_INTERNAL]:true});
+            await this.#enqueue({action:'book_stop',chat_url:stopUrl,device_id:task.device_id,
+              after_job_id:writer.id,book_task_id:task.id,book_index:task.index,
+              request_id:'book-stop-'+writer.id,[BOOK_INTERNAL]:true});
             changed=true;
           } catch(err){task.last_enqueue_error=err.message;changed=true;}
         }

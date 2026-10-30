@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FileQueue} from '../relay/queue.mjs';
@@ -100,6 +100,42 @@ test('late model activity cannot occur inside nominal book rest: exact Stop prec
   await f.activity(first,'staged',oldOperation);
   await f.q.tick();
   assert.equal((await f.q.claim('desktop')).action,'start','only after all 35 minutes may the next book writer start');
+});
+
+for(const restDue of [false,true]) test(`legacy unfinished predecessor blocks ${restDue?'rest':'new writer'} until exact Stop`,async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const last=new Date(f.now()).toISOString();
+  f.advance((restDue?201:21)*60_000);
+  await f.activity(first,'staged',last);
+  // Persisted state made by the old relay: a successor exists without proof
+  // that the predecessor stopped; the successor itself then reported blocked.
+  const state=JSON.parse(await readFile(f.file,'utf8'));
+  const prior=state.jobs.find(j=>j.id===first.job_id);
+  const successor={...prior,id:'bbbbbbbb-1111-2222-3333-cccccccccccc',
+    chat_url:NEXT,result_chat_url:NEXT,model_status:'blocked',
+    created_at:new Date(f.now()).toISOString()};
+  state.jobs.push(successor);state.book_tasks[0].job_id=successor.id;
+  await writeFile(f.file,JSON.stringify(state));
+  const q=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0});
+  await q.initialize();
+  await q.closeRetiredBookChats();
+  await q.tick();
+  assert.equal(q.status(first.job_id).book_task.rest_until,null);
+  const stop=await q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  assert.equal(await q.claim('desktop'),null);
+  await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await q.tick();
+  if(restDue)assert.ok(q.status(first.job_id).book_task.rest_until);
+  else {
+    const next=await q.claim('desktop');
+    assert.ok(['start','continue'].includes(next.action));
+    assert.equal(next.book_task_id,first.job_id);
+  }
 });
 
 test('uncertain book delivery cannot create a second writer before confirmed Stop',async t=>{

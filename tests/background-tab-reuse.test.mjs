@@ -116,7 +116,7 @@ test('probe deadline bounds inspection while start/continue stay outside it',asy
 });
 
 
-test('private book Stop uses the exact existing tab; never creates one or visits another conversation',async()=>{
+test('private book Stop reuses or reopens only its exact conversation without sending a prompt',async()=>{
   const id='6ed884fe-1026-4728-2017-d6c47282017a';
   const job={action:'book_stop',chat_url:CHAT,after_job_id:id};
   const f=fixture([{id:19,url:OTHER},{id:21,url:CHAT}],{driverResults:[
@@ -126,11 +126,12 @@ test('private book Stop uses the exact existing tab; never creates one or visits
   assert.deepEqual(f.calls.created,[]);
   assert.deepEqual(f.calls.updated,[]);
   assert.deepEqual(f.calls.injections,[21,21]);
-  const missing=fixture([{id:19,url:OTHER}]);
-  const blocked=await missing.execute(job);
-  assert.equal(blocked.status,'blocked');
-  assert.deepEqual(missing.calls.created,[]);
-  assert.deepEqual(missing.calls.injections,[]);
+  const missing=fixture([{id:19,url:OTHER}],{driverResults:[{status:'stopped',chat_url:CHAT}]});
+  assert.equal((await missing.execute(job)).status,'stopped');
+  assert.equal(missing.calls.created.length,1);
+  assert.equal(missing.calls.created[0].url,CHAT);
+  assert.deepEqual(missing.calls.injections,[100,100]);
+  assert.deepEqual(missing.calls.updated,[],'unrelated conversation remains untouched');
   const ambiguous=fixture([{id:19,url:CHAT},{id:21,url:CHAT}]);
   assert.equal((await ambiguous.execute(job)).status,'blocked');
   assert.deepEqual(ambiguous.calls.injections,[]);
