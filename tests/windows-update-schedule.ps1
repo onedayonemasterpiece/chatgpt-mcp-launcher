@@ -25,6 +25,24 @@ Set-Content -LiteralPath (Join-Path $Root 'receipt.txt') -Value $Root -NoNewline
     throw 'Registered scheduler command did not execute in its configured installation root'
   }
   Write-Host 'PASS: scheduled updater executes with custom root and permits battery operation'
+  # A hidden manual check must report contention to the popup, not silently exit OK.
+  New-Item -ItemType Directory -Force -Path (Join-Path $Root 'source\chatgpt-launcher\extension') | Out-Null
+  $busyMutex = [System.Threading.Mutex]::new($false,'Local\ChatGPTMcpLauncherPublicUpdate')
+  $busyHeld = $busyMutex.WaitOne(0)
+  try {
+    if (!$busyHeld) { throw 'Fixture could not acquire updater mutex' }
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Manual -Root $Root
+    $busyExit = $LASTEXITCODE
+    $busyStatus = Get-Content -Raw (Join-Path $Root 'source\chatgpt-launcher\extension\updater-status.json') | ConvertFrom-Json
+    if ($busyExit -ne 1 -or $busyStatus.state -ne 'error' -or $busyStatus.error_code -ne 'updater_already_running' -or $busyStatus.trigger -ne 'manual' -or !$busyStatus.check_id) {
+      throw 'Contended manual updater must return a correlated terminal error'
+    }
+    Write-Host 'PASS: contended manual updater reports its exact reason without downloading or modifying source'
+    $global:LASTEXITCODE = 0 # The child failure above is the expected assertion outcome.
+  } finally {
+    if ($busyHeld) { $busyMutex.ReleaseMutex() }
+    $busyMutex.Dispose()
+  }
 } finally {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   if (Test-Path $Root) { Remove-Item $Root -Recurse -Force }

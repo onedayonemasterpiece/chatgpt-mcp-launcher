@@ -159,7 +159,7 @@ try {
   New-Item -ItemType Directory -Path $Root -Force | Out-Null
   $mutex = [System.Threading.Mutex]::new($false,'Local\ChatGPTMcpLauncherPublicUpdate')
   $lockHeld = $mutex.WaitOne(0)
-  if(!$lockHeld) { Write-Host 'Another updater check is already running.'; exit 0 }
+  if(!$lockHeld) { throw 'updater_already_running' }
 
   # Report progress immediately, including when no archive download is needed.
   Report-Status 'checking'
