@@ -80,7 +80,8 @@ export function callbackFooter(jobId) {
 }
 const BOOK_FOOTER = ' При импорте книги сообщай status=done после каждого законченного хода; '+
   'book_completed=true ТОЛЬКО когда дочитана вся книга. Новый чат должен начать с book_ingest(status) '+
-  'для того же ingestion_id, не повторяя принятых страниц.';
+  'для того же ingestion_id, не повторяя принятых страниц. Не публикуй каждый ход в Slack: ' +
+  'единственный итог по книге отправляет Launcher.';
 
 // One plain instruction per state, so a calling agent always knows what to do next.
 function nextStep(job) {
@@ -968,6 +969,7 @@ export class FileQueue {
       const sends=job.action==='start'||job.action==='continue';
       const effectivePrompt=(job.handoff_prefix||'')+(job.prompt||'');
       return {...job,action:job.delivery_action||job.action,
+        ...(job.book_task_id?{slack_thread_url:null}:{}), // Book completion is posted once by relay, not by each ChatGPT turn.
         chat_url:job.delivery_action==='start'?null:job.chat_url,
         request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?BOOK_FOOTER:''):job.prompt,
         mention:sends?APP_NAME:undefined,
