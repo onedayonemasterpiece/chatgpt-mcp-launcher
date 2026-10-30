@@ -180,7 +180,7 @@ function slackBookNotifierFromEnv() {
       throw Error('Invalid book Slack thread');
     const message=task.kind==='no_progress'?
       'Два новых окна подряд без новых операций RKB; задача остаётся активной':
-      task.state==='done'?'Список книг дочитан':'Импорт остановлен: RKB blocker';
+      task.state==='done'?'Список книг дочитан':'Импорт остановлен';
     const response=await fetch('https://slack.com/api/chat.postMessage',{
       method:'POST',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},
       body:JSON.stringify({channel:m[1],thread_ts:m[2]+'.'+m[3],
