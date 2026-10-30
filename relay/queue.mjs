@@ -851,12 +851,15 @@ export class FileQueue {
       if(job.fallback_job_id) {
         task.job_id=job.fallback_job_id; changed=true; continue;
       }
-      if(task.activity?.state==='complete'||task.activity?.state==='completed'||
-        (job.model_status==='done'&&job.book_completed)) {
-        task.state='done';task.terminal_summary=job.model_summary||'Книга дочитана';changed=true;continue;
+      const fullBook=jobs.find(j=>j.model_status==='done'&&j.book_completed);
+      if(task.activity?.state==='complete'||task.activity?.state==='completed'||fullBook) {
+        task.state='done';task.terminal_summary=fullBook?.model_summary||'Книга дочитана';
+      } else if(task.activity?.state==='blocked') {
+        task.state='blocked';task.terminal_summary='RKB status: blocked';
       }
-      if(task.activity?.state==='blocked') {
-        task.state='blocked';task.terminal_summary='RKB status: blocked';changed=true;continue;
+      if(task.state!=='active') {
+        if(job.status==='queued') {job.status='expired';job.message='Cancelled: book task reached terminal state';}
+        changed=true;continue;
       }
       if(['queued','claimed'].includes(job.status))continue;
       const activity=task.activity;
