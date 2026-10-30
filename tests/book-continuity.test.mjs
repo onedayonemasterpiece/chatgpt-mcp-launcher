@@ -43,20 +43,20 @@ async function fixture(t) {
   return {q,file,now,start,deliver,activity,advance(ms){time+=ms;}};
 }
 
-test('page_completed starts a continuation in the SAME chat but never finalizes book',async t=>{
+test('30-minute active reading creates no browser probes or short tasks; real turn completion continues same chat',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   const initial=await f.deliver(first);
   assert.match(initial.own_text,new RegExp(ING1),'first window receives its book selector');
   await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'started'});
-  f.advance(31_000);
-  await f.q.tick();
-  const probe=await f.q.claim('desktop');
-  assert.equal(probe.action,'reconcile');
-  assert.equal(probe.verify_job_id,first.job_id);
-  await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
-    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  for(let minute=0;minute<30;minute++) {
+    f.advance(60_000);
+    await f.activity(first);
+    await f.q.tick();
+    assert.equal(await f.q.claim('desktop'),null,'ongoing RKB reading needs no browser inspection or continuation');
+  }
+  await f.q.modelReport({job_id:first.job_id,status:'done',summary:'End of a real working turn'});
   await f.q.tick();
   const next=await f.q.claim('desktop');
   assert.equal(next.action,'continue');
@@ -77,10 +77,7 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   f.advance(21*60_000);
   await f.q.bookActivity({book_task_id:first.job_id,state:'unavailable'});
   await f.q.tick();
-  const probe=await f.q.claim('desktop');
-  assert.ok(!probe||probe.action==='reconcile','unavailable RKB cannot start a replacement chat');
-  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
-    delivery_evidence:'unknown'});
+  assert.equal(await f.q.claim('desktop'),null,'unavailable RKB cannot start a replacement or browser probe');
   await f.activity(first,'staged',previous);
   await Promise.all([f.q.tick(),f.q.tick()]);
   const replacement=await f.q.claim('desktop');
@@ -120,10 +117,7 @@ test('ordered books: only RKB finalized/done moves to next NEW chat, finally sto
   f.advance(25*60_000);
   await f.activity(first,'processing');
   await f.q.tick();
-  const probe=await f.q.claim('desktop');
-  assert.ok(!probe||probe.action==='reconcile','RKB processing/wait cannot start a stale chat');
-  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:NEXT,
-    delivery_evidence:'unknown'});
+  assert.equal(await f.q.claim('desktop'),null,'RKB processing/wait cannot start a stale chat or browser probe');
   await f.activity(first,'finalized');
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.state,'done');
@@ -236,10 +230,7 @@ test('RKB failed/blocker stops list; processing/wait never means stale',async t=
   f.advance(22*60_000);
   await f.activity(first,'processing',new Date(f.now()-22*60_000).toISOString());
   await f.q.tick();
-  const probe=await f.q.claim('desktop');
-  assert.ok(!probe||probe.action==='reconcile','RKB processing state can only schedule read-only probe');
-  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
-    delivery_evidence:'unknown'});
+  assert.equal(await f.q.claim('desktop'),null,'RKB processing creates no short browser tasks');
   await f.activity(first,'failed');
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.state,'blocked');
@@ -301,22 +292,17 @@ test('existing relay timer invokes injected RKB test double only for active inge
 });
 
 
-test('explicit client safety rejection stops only this book after page_completed; stale RKB cannot restart it',async t=>{
+test('explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
   const oldOperation=new Date(f.now()-21*60_000).toISOString();
   await f.activity(first,'staged',oldOperation); // RKB never received rejected stage.
   await f.q.modelReport({job_id:first.job_id,status:'started'});
-  f.advance(31_000);
-  await f.q.tick();
-  const probe=await f.q.claim('desktop');
-  assert.equal(probe.action,'reconcile');
-  await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
-    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  await f.q.modelReport({job_id:first.job_id,status:'done'});
   await f.q.tick();
   const queuedId=f.q.status(first.job_id).book_task.current_job_id;
-  assert.equal(f.q.status(queuedId).status,'queued','page proof queued next turn before refusal');
+  assert.equal(f.q.status(queuedId).status,'queued','finished turn queued continuation before late refusal');
 
   const other=await f.start([{ingestion_id:ING2}],'unrelated-book');
   const refusal='Script error: Этот вызов инструмента был заблокирован системами безопасности OpenAI. Внимательно проверьте отправляемые данные.';
