@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FileQueue} from '../relay/queue.mjs';
@@ -298,4 +298,102 @@ test('existing relay timer invokes injected RKB test double only for active inge
   await new Promise(resolve=>setTimeout(resolve,120));
   assert.deepEqual(calls,[ING1],'only one activity poll in initial five-minute interval');
   assert.equal(queue.status(first.job_id).book_task.activity_state,'staged');
+});
+
+
+test('explicit client safety rejection stops only this book after page_completed; stale RKB cannot restart it',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  const oldOperation=new Date(f.now()-21*60_000).toISOString();
+  await f.activity(first,'staged',oldOperation); // RKB never received rejected stage.
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  f.advance(31_000);
+  await f.q.tick();
+  const probe=await f.q.claim('desktop');
+  assert.equal(probe.action,'reconcile');
+  await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  await f.q.tick();
+  const queuedId=f.q.status(first.job_id).book_task.current_job_id;
+  assert.equal(f.q.status(queuedId).status,'queued','page proof queued next turn before refusal');
+
+  const other=await f.start([{ingestion_id:ING2}],'unrelated-book');
+  const refusal='Script error: Этот вызов инструмента был заблокирован системами безопасности OpenAI. Внимательно проверьте отправляемые данные.';
+  const report={job_id:first.job_id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal};
+  await f.q.modelReport(report);
+  await f.q.modelReport(report); // Duplicate callback must not create a second notice.
+  assert.equal(f.q.status(first.job_id).book_task.state,'blocked');
+  assert.equal(f.q.status(first.job_id).book_task.terminal_summary,'OpenAI client safety rejection: '+refusal);
+  assert.equal(f.q.status(queuedId).status,'expired','queued successor was never sent');
+  assert.equal(f.q.pendingBookNotices().length,1);
+  assert.equal(f.q.pendingBookNotices()[0].kind,'terminal');
+
+  await f.deliver(other,NEXT);
+  await f.activity(other);
+  await f.q.modelReport({job_id:other.job_id,status:'done',summary:'Normal turn completion'});
+  await f.q.tick();
+  const otherNext=await f.q.claim('desktop');
+  assert.equal(otherNext.action,'continue','unrelated book keeps reading');
+  assert.equal(otherNext.book_task_id,other.job_id);
+  await f.q.report('desktop',{job_id:otherNext.id,status:'sent',chat_url:NEXT});
+  const initialJobs=JSON.parse(await readFile(f.file,'utf8')).jobs
+    .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action)).length;
+
+  f.advance(25*60_000);
+  await f.activity(first,'staged',oldOperation);
+  await Promise.all([f.q.tick(),f.q.tick(),f.q.tick()]);
+  const reloaded=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+  await reloaded.initialize();
+  await reloaded.tick();
+  const laterJobs=JSON.parse(await readFile(f.file,'utf8')).jobs
+    .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action));
+  assert.equal(laterJobs.length,initialJobs,'no new sends, rollover or retry after stale RKB and restart');
+  assert.ok(!laterJobs.some(j=>j.status==='queued'||j.status==='claimed'));
+  assert.deepEqual(reloaded.activeBooks(),[{book_task_id:other.job_id,ingestion_id:ING2}]);
+  assert.equal(reloaded.pendingBookNotices().length,1);
+  await reloaded.bookNoticeSent(first.job_id,first.job_id);
+  assert.equal(reloaded.pendingBookNotices().length,0,'exactly one terminal notice');
+  await reloaded.tick();
+  assert.equal(reloaded.pendingBookNotices().length,0);
+});
+
+test('generic model blocked/done are only turn outcomes; narrow failure_kind is validated',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  await f.activity(first);
+  await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'done',
+    failure_kind:'client_safety_rejection',summary:'false'}),/failure_kind requires blocked/);
+  await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'blocked',
+    failure_kind:'client_safety_rejection',summary:'  '}),/failure_kind requires blocked/);
+  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'Ordinary model blocker'});
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Finished turn'});
+  await f.q.tick();
+  const continued=await f.q.claim('desktop');
+  assert.equal(continued.action,'continue','generic done remains a turn completion');
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+  assert.equal(f.q.pendingBookNotices().length,0);
+});
+
+test('late client safety report from prior book cannot stop already advanced ingestion',async t=>{
+  const f=await fixture(t);
+  const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);
+  await f.deliver(first);
+  await f.activity(first,'finalized');
+  await f.q.tick();
+  const current=f.q.status(first.job_id).book_task.current_job_id;
+  assert.equal(f.q.status(first.job_id).book_task.current_book_index,1);
+  assert.equal(f.q.status(current).status,'queued');
+  await f.q.modelReport({job_id:first.job_id,status:'blocked',
+    failure_kind:'client_safety_rejection',summary:'Old page rejected before the prior book finalized'});
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+  assert.equal(f.q.status(current).status,'queued','current book start must not be cancelled');
+  assert.equal(f.q.pendingBookNotices().length,0);
+  const newBook=await f.q.claim('desktop');
+  assert.equal(newBook.id,current);
+  assert.equal(newBook.action,'start');
+  assert.equal(newBook.book_index,1);
 });
