@@ -56,3 +56,87 @@ After a deploy that adds or changes MCP tools of a ChatGPT plugin (for RKB: «Ka
 Only the Chrome device endpoints are exposed by the HTTPS proxy. MCP itself remains private. No API keys, passwords or cookies should ever be included in this repository. Source publication is separate from configuring the private relay and server infrastructure.
 
 Run `npm test` to test the relay, extension logic and version reporting; mock tests are not live ChatGPT acceptance.
+
+## RKB: автономное чтение очереди книг
+
+Один `chatgpt_start` с первым `prompt`, уникальным `request_id`,
+`slack_thread_url` и объектом `book` создаёт долговечную задачу:
+
+~~~json
+{
+  "book": {
+    "books": [
+      {"ingestion_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+      {"ingestion_id": "11111111-2222-3333-4444-555555555555", "telegram_original": "t.me/c/1/2"}
+    ],
+    "continuation_prompt": "Продолжай импорт текущей книги. Сначала book_ingest(status); принятые страницы не повторяй."
+  }
+}
+~~~
+
+Книги идут **в указанном порядке**; подтверждённый RKB
+`state=finalized, next_action=done` создаёт новый чат через уже
+имеющийся `start` для следующей книги. Лишь `finalized/done` на **последней**
+книге завершает всю задачу. `failed/blocker` — настоящий блокер RKB.
+Обычные `chatgpt_report(done)` или доказанное `page_completed` означают
+только конец **одного хода**, они **не** завершают книгу. Входной `books`
+резервирует уникальные ingestion UUID среди активных задач.
+Первый `job_id` также является `book_task_id`. Прогресс виден
+в `chatgpt_task_status(job_id).book_task`.
+
+**RKB — источник живости и завершения.** Relay опрашивает только
+активные книги раз в 5 минут по внутреннему read-only API
+`GET /internal/import/activity?ingestion_id=UUID` с контрактом
+`{state,next_action,last_operation_at,accepted_pages,next_cursor}`.
+`last_operation_at` берётся из RKB `book_pages`/`book_ingest`, а не
+из действий на странице ChatGPT. Только свежий ответ
+`staged/continue_pages` при 20 мин без операций позволяет объявить окно
+мёртвым. `processing/wait`, недоступный RKB, `last_operation_at=null`
+**не** вызывают принудительный новый чат.
+
+Обычное завершение хода отправляет `continuation_prompt` в тот же чат.
+После пяти продолжений либо при 90-минутном возрасте окна используется
+существующий `successor`. Новое окно одной книги создаётся **не чаще одного
+раза в 20 минут**. Если два подтверждённых окна-замены подряд
+не привели к новой RKB-операции, Launcher отправляет **одно** фактическое
+уведомление в `slack_thread_url`, но задача остаётся активной.
+После новой RKB-операции отсчёт начинается заново. Итоговая остановка
+способна отправить отдельное одно сообщение.
+
+**Явный отказ клиентской защиты OpenAI:** если именно клиент ChatGPT
+отклонил `book_ingest(stage)` **до** RKB handler, читатель сообщает
+`chatgpt_report(status="blocked", failure_kind="client_safety_rejection",
+summary="<точный текст отказа>")`. Только такое структурированное сообщение
+останавливает текущую book-task в существующем `blocked`, отменяет её
+**ещё не отправленные** продолжения и выдаёт одно терминальное уведомление.
+Обычные `done` и `blocked` без `failure_kind` не подменяют статус RKB.
+Причина клиентской блокировки не установлена; повтор через successor
+не является её исправлением ([RKB PR646](https://github.com/onedayonemasterpiece/regional-knowledge-base/pull/646)).
+
+**Конфигурация на сервере (только защищённый runtime конфиг):**
+
+- `LAUNCHER_RKB_ACTIVITY_URL=http://127.0.0.1:8000/internal/import/activity`
+- `LAUNCHER_RKB_ACTIVITY_TOKEN` — отдельный сервисный Bearer, не токен владельца.
+- `LAUNCHER_RKB_SERVICE_CREDENTIAL_ID` — UUID сервисного credential.
+- `LAUNCHER_RKB_SERVICE_CREDENTIAL_EPOCH` — выданный RKB epoch.
+- `LAUNCHER_SLACK_BOT_TOKEN` — для доставки уведомлений в заданный тред.
+
+RKB требует `X-RKB-Service: launcher-import-watch`,
+`X-RKB-Service-Credential` и `X-RKB-Service-Epoch` вместе с Bearer.
+Секретов в URL, владельческого OAuth, дополнительных сервисов
+и чтения DOM для живости нет. Пока PR RKB не установлен,
+интерфейс проверяется через внедрённый `bookActivityReader`-двойник
+в `makeRelay`. Дополнительного MCP-инструмента для ручной
+передачи активности нет.
+
+**Селекторы:** текущий RKB activity endpoint принимает только UUID,
+поэтому для сохранённого `telegram_original` нужно передавать также
+связанный `ingestion_id` из списка оригиналов. Только locator **без UUID**
+отклоняется до появления read-only resolver в RKB: Launcher не может
+доказать активность или завершение для такого ввода. Это ограничение
+контракта RKB, а не повод доверять модели.
+
+После ревью/merge и установки Шкипером требуется живой тест
+сервисного доступа по loopback, двух параллельных **разных** книг,
+полного перехода и однократных Slack-уведомлений. Успешный `npm test`
+сам по себе не является live-приёмкой.

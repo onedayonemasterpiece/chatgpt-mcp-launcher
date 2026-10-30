@@ -15,6 +15,9 @@ const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_
 const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
+const BOOK_SILENCE_MS = 20 * 60_000;
+const BOOK_WINDOW_MS = 90 * 60_000;
+const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
@@ -76,6 +79,20 @@ export function callbackFooter(jobId) {
     'сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
+const BOOK_FOOTER = ' При импорте книги сообщай status=done после законченного хода. '+
+  'Не определяй завершение книги самостоятельно: единственный источник статуса — RKB. '+
+  'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
+  'Не публикуй каждый ход в Slack: итог отправляет Launcher. '+
+  'Если OpenAI явно отклонил book_ingest(stage) клиентской проверкой безопасности, '+
+  'вызови chatgpt_report(status=blocked, failure_kind=client_safety_rejection, '+
+  'summary=точный текст отказа); не повторяй вызов через другой чат.';
+const bookPrompt=(task,index)=>{
+  const selector=task.books[index];
+  return '(Книга '+(index+1)+' из '+task.books.length+': ingestion_id='+selector.ingestion_id+
+    (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
+    '. Сначала book_ingest(status) по этому ingestion_id; это не предыдущая книга. '+
+    'Принятые страницы не повторяй.)\n\n'+task.continuation_prompt;
+};
 
 // One plain instruction per state, so a calling agent always knows what to do next.
 function nextStep(job) {
@@ -166,7 +183,7 @@ function requireString(value, name, maxLen = 256) {
 }
 
 export class FileQueue {
-  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null, request_receipts: [] };
+  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null, request_receipts: [], book_tasks: [] };
   #serial = Promise.resolve();
   // silenceMs: no report from the agent for this long after started/progress
   // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
@@ -280,7 +297,8 @@ export class FileQueue {
       this.#state = {...parsed,device_status:parsed.device_status||{},chats:Array.isArray(parsed.chats)?parsed.chats:[],
         subscriptions:Array.isArray(parsed.subscriptions)?parsed.subscriptions:[],
         outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null,
-        request_receipts:Array.isArray(parsed.request_receipts)?parsed.request_receipts:[]};
+        request_receipts:Array.isArray(parsed.request_receipts)?parsed.request_receipts:[],
+        book_tasks:Array.isArray(parsed.book_tasks)?parsed.book_tasks:[]};
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
       // Earlier releases left such jobs as needs_review; they certainly sent nothing.
@@ -313,14 +331,32 @@ export class FileQueue {
     this.#serial = promise.catch(() => undefined);
     return promise;
   }
-  async enqueue(args) {
-    return this.#run(async()=>{
+  async enqueue(args) { return this.#run(()=>this.#enqueue(args)); }
+  async #enqueue(args) {
       const action=args.action;
+      const internalBook=args[BOOK_INTERNAL]===true;
       if(!['start','continue','open','read','close','reconcile','refresh_tools'].includes(action))throw Error('Invalid action');
       const noPrompt=['open','read','close','reconcile','refresh_tools'].includes(action);
       if(action==='refresh_tools' && !PLUGIN_URL.test(args.plugin_url||''))
         throw Error('plugin_url must be https://chatgpt.com/settings/plugins-settings/plugin_<id>');
-      const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
+      let prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
+      const book=args.book;
+      if(book!==undefined) {
+        if(action!=='start')throw Error('book is only accepted by chatgpt_start');
+        requireString(book.continuation_prompt,'book.continuation_prompt',MAX_PROMPT);
+        if(!Array.isArray(book.books)||book.books.length<1||book.books.length>32)
+          throw Error('book.books must contain 1-32 ordered ingestion selectors');
+        for(const selector of book.books) {
+          if(!selector||typeof selector!=='object'||Array.isArray(selector)||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selector.ingestion_id||''))
+            throw Error('Each book needs a canonical ingestion_id (RKB activity API has no telegram_original lookup)');
+          if(selector.telegram_original!==undefined)
+            requireString(selector.telegram_original,'book.books[].telegram_original',1000);
+        }
+        if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
+          throw Error('Duplicate ingestion_id in book list');
+        prompt=bookPrompt({books:book.books,continuation_prompt:prompt},0);
+      }
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
       if(effort!==null&&!EFFORTS.includes(effort))throw Error('Invalid effort');
@@ -345,12 +381,18 @@ export class FileQueue {
       }
       if(args.slack_thread_url!==undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url))
         throw Error('Invalid Slack thread URL');
+      if(book&&!args.slack_thread_url)throw Error('Book task requires slack_thread_url for completion and no-progress notices');
       const requestId=args.request_id===undefined?undefined:requireString(args.request_id,'request_id',128);
+      const sameBook=j=>{
+        const task=this.#state.book_tasks.find(t=>t.id===j.id);
+        return book?task?.continuation_prompt===book.continuation_prompt&&
+          JSON.stringify(task?.books)===JSON.stringify(book.books):!task;
+      };
       if(requestId) {
         const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
         if(existing) {
           if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target||
-            (action==='reconcile'&&existing.reconcile_of!==reviewSource.id))
+            (action==='reconcile'&&existing.reconcile_of!==reviewSource.id)||!sameBook(existing))
             throw Error('Idempotency key belongs to a different operation');
           return this.#public(existing);
         }
@@ -359,12 +401,15 @@ export class FileQueue {
         const receipt=this.#state.request_receipts.find(r=>r.device_id===deviceId&&r.request_id===requestId);
         if(receipt) {
           if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt)||
-            (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id))
+            (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id)||!sameBook(receipt.job))
             throw Error('Idempotency key belongs to a different operation');
           return {...this.#public(receipt.job),archived:true};
         }
       }
-      if(action==='reconcile' && reviewSource.status!=='needs_review' &&
+      const bookProbe=action==='reconcile'&&internalBook&&!!args.book_task_id&&
+        args.book_task_id===reviewSource?.book_task_id&&
+        reviewSource?.status==='sent'&&!reviewSource?.page_completed_at;
+      if(action==='reconcile' && !bookProbe && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
         throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
       this.#expire(this.now());
@@ -377,7 +422,7 @@ export class FileQueue {
       }
       // Serialized with enqueue/report/modelReport: a pending or uncertain send
       // reserves the chat until a definite outcome, including across restarts.
-      if(action==='continue') {
+      if(action==='continue'&&!(internalBook&&args.book_stale)) {
         const same=[...this.#state.jobs].reverse().filter(j=>
           (j.action==='start'||j.action==='continue')&&
           ((j.result_chat_url||j.chat_url)===target||j.previous_chat_url===target));
@@ -390,19 +435,27 @@ export class FileQueue {
         if(busy) throw Error('The agent or delivery outcome in this chat is still working/unconfirmed (job '+
           busy.id+', '+this.#execution(busy)+'). Reconcile before continuing; never launch a duplicate.');
       }
+      if(book) {
+        const ids=new Set(book.books.map(x=>x.ingestion_id));
+        const active=this.#state.book_tasks.find(t=>t.state==='active'&&
+          t.books.slice(t.index).some(b=>ids.has(b.ingestion_id)));
+        if(active) throw Error('This ingestion already has an active book task: '+active.id);
+      }
       const existingChat=this.#state.chats.find(c=>c.chat_url===target&&c.device_id===deviceId);
       if(action==='continue'&&existingChat?.successor_chat_url) {
         throw Error('This chat has already been handed off to '+existingChat.successor_chat_url+
           '. Follow its new chat_id instead of creating a second successor.');
       }
       const count=continuationCount(existingChat?.continuation_count);
-      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS);
+      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS||
+        (internalBook&&(args.book_stale||args.book_window_age)));
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
       const jobId=randomUUID();
       const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId):null;
       // Reject before queue admission: this exact payload is what Chrome's
       // preparePrompt validates, including the callback footer added at claim.
-      if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length>MAX_PROMPT)
+      if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
+        ((book||(internalBook&&args.book_task_id))?BOOK_FOOTER.length:0)>MAX_PROMPT)
         throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
         // Never evict an ambiguous send: losing that receipt could authorize a
@@ -429,14 +482,19 @@ export class FileQueue {
         id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
+        ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id,
+          book_index:book?0:args.book_index,book_activity_at_creation:args.book_activity_at_creation||null}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
-          handoff_prefix:prefix,handoff_reason:count===null?'unknown_count':'limit_reached'}:{})
+          handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
       };
       this.#state.jobs.push(job);
-      await this.#save();
+      if(internalBook&&args.book_replacement) job.handoff_reason||='book_silent';
+      if(book) this.#state.book_tasks.push({id:jobId,books:book.books,index:0,device_id:deviceId,
+        continuation_prompt:book.continuation_prompt,slack_thread_url:args.slack_thread_url||null,
+        job_id:jobId,state:'active',activity:null});
+      if(!internalBook)await this.#save();
       return this.#public(job);
-    });
   }
   // Read-only verification of one uncertain delivery. It never resends the
   // original prompt and cannot clear uncertainty without a positive receipt.
@@ -522,7 +580,9 @@ export class FileQueue {
     const {prompt,handoff_prefix,...publicJob} = job;
     const actual=job.result_chat_url||(job.delivery_action==='start'?null:job.chat_url);
     const chat=this.#state.chats.find(c=>c.chat_url===actual&&c.device_id===job.device_id);
+    const book=this.#state.book_tasks.find(t=>t.id===job.book_task_id);
     return {job_id:job.id,...publicJob,chat_url:actual,chat_id:chatIdFromUrl(actual),
+      ...(book?{book_task:this.#bookPublic(book)}:{}),
       continuation_count:continuationCount(chat?.continuation_count),
       execution:this.#execution(job),next_step:nextStep(job)};
   }
@@ -753,9 +813,168 @@ export class FileQueue {
           }
         }
       }
+      if(await this.#driveBooks(now)) changed=true;
       if(changed) await this.#save();
     });
   }
+
+  // One source of truth: the read-only RKB import-activity snapshot.
+  async bookActivity(data) {
+    return this.#run(async()=>{
+      const task=this.#state.book_tasks.find(t=>t.id===data.book_task_id);
+      if(!task)throw Error('Unknown book_task_id');
+      if(task.state!=='active')return this.#bookPublic(task);
+      const expected={processing:'wait',staged:'continue_pages',finalized:'done',failed:'blocker'};
+      const state=requireString(data.state,'state',32);
+      if(state!=='unavailable'&&(!Object.hasOwn(expected,state)||data.next_action!==expected[state]))
+        throw Error('Invalid RKB import activity state/next_action pair');
+      const stamp=data.last_operation_at==null?null:safeDate(data.last_operation_at);
+      if(data.last_operation_at!=null&&!stamp)throw Error('Invalid RKB last_operation_at');
+      const previous=task.activity?.last_operation_at||null;
+      if(stamp&&stamp!==previous&&(!previous||stamp>previous)) {
+        task.no_progress_new_chats=0;
+        task.no_progress_alert_id=null;
+        task.no_progress_notified_id=null;
+      }
+      task.activity={state,next_action:state==='unavailable'?null:data.next_action,
+        last_operation_at:stamp&&(!previous||stamp>previous)?stamp:previous,
+        accepted_pages:Number.isInteger(data.accepted_pages)?data.accepted_pages:(task.activity?.accepted_pages??null),
+        next_cursor:typeof data.next_cursor==='string'?data.next_cursor:null,
+        checked_at:new Date(this.now()).toISOString()};
+      await this.#save();
+      return this.#bookPublic(task);
+    });
+  }
+  activeBooks() {
+    return this.#state.book_tasks.filter(t=>t.state==='active')
+      .map(t=>({book_task_id:t.id,ingestion_id:t.books[t.index].ingestion_id}));
+  }
+  #bookPublic(task) {
+    return {book_task_id:task.id,state:task.state,ingestion_id:task.books[task.index].ingestion_id,
+      current_book_index:task.index,total_books:task.books.length,
+      current_job_id:task.job_id,last_operation_at:task.activity?.last_operation_at||null,
+      activity_state:task.activity?.state||null,next_action:task.activity?.next_action||null,
+      accepted_pages:task.activity?.accepted_pages??null,next_cursor:task.activity?.next_cursor||null,
+      no_progress_new_chats:task.no_progress_new_chats||0,
+      terminal_summary:task.terminal_summary||null,last_enqueue_error:task.last_enqueue_error||null};
+  }
+  pendingBookNotices() {
+    return this.#state.book_tasks.flatMap(t=>{
+      const shared={...this.#bookPublic(t),slack_thread_url:t.slack_thread_url};
+      if(!t.slack_thread_url)return [];
+      if(t.state!=='active'&&!t.notice_sent_at)
+        return [{...shared,kind:'terminal',notice_id:t.id}];
+      if(t.state==='active'&&t.no_progress_alert_id&&t.no_progress_notified_id!==t.no_progress_alert_id)
+        return [{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
+      return [];
+    });
+  }
+  async bookNoticeSent(id,noticeId) {
+    return this.#run(async()=>{
+      const task=this.#state.book_tasks.find(t=>t.id===id);
+      if(!task)throw Error('Unknown book task');
+      if(task.state!=='active'&&noticeId===task.id)
+        task.notice_sent_at||=new Date(this.now()).toISOString();
+      else if(task.state==='active'&&noticeId===task.no_progress_alert_id)
+        task.no_progress_notified_id=noticeId;
+      else throw Error('Obsolete book notice');
+      await this.#save();
+    });
+  }
+  async #driveBooks(now) {
+    let changed=false;
+    for(const task of this.#state.book_tasks) {
+      if(task.state!=='active')continue;
+      const jobs=this.#state.jobs.filter(j=>j.book_task_id===task.id&&
+        ['start','continue'].includes(j.action));
+      const job=jobs.at(-1);
+      if(!job)continue;
+      if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
+      const activity=task.activity;
+      // A completed/failed book is determined ONLY by RKB, never by ChatGPT.
+      if(activity?.state==='finalized'&&activity.next_action==='done') {
+        if(job.status==='queued') {
+          job.status='expired';job.message='Previous book already finalized in RKB';
+        }
+        if(task.index===task.books.length-1) {
+          task.state='done';task.terminal_summary='All '+task.books.length+' books finalized in RKB';
+        } else {
+          const nextIndex=task.index+1;
+          try {
+            const next=await this.#enqueue({action:'start',prompt:bookPrompt(task,nextIndex),
+              device_id:task.device_id,request_id:'book-next-book-'+task.id+'-'+nextIndex,
+              book_task_id:task.id,book_index:nextIndex,[BOOK_INTERNAL]:true});
+            task.job_id=next.job_id;task.index=nextIndex;task.activity=null;
+            task.last_replacement_at=null;task.no_progress_new_chats=0;
+            task.no_progress_alert_id=null;task.no_progress_notified_id=null;
+            task.last_enqueue_error=null;
+          } catch(err){task.last_enqueue_error=err.message;}
+        }
+        changed=true;continue;
+      }
+      if(activity?.state==='failed'&&activity.next_action==='blocker') {
+        if(job.status==='queued'){job.status='expired';job.message='RKB reported blocker';}
+        task.state='blocked';task.terminal_summary='RKB failed/blocker: '+task.books[task.index].ingestion_id;
+        changed=true;continue;
+      }
+      // Count only confirmed replacement chats; any newer RKB reader operation
+      // resets the streak in bookActivity(). No successful start -> no alarm.
+      if(job.status==='sent'&&job.result_chat_url&&job.handoff_reason&&!job.book_handoff_counted&&
+        job.book_index===task.index) {
+        job.book_handoff_counted=true;changed=true;
+        if(activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+          activity.last_operation_at===job.book_activity_at_creation) {
+          task.no_progress_new_chats=(task.no_progress_new_chats||0)+1;
+          if(task.no_progress_new_chats>=2&&!task.no_progress_alert_id)
+            task.no_progress_alert_id=randomUUID();
+        }
+      }
+      if(['queued','claimed'].includes(job.status))continue;
+      const lastOperation=Date.parse(activity?.last_operation_at||'');
+      const checked=Date.parse(activity?.checked_at||'');
+      const silent=activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+        Number.isFinite(lastOperation)&&now-lastOperation>=BOOK_SILENCE_MS&&
+        now-checked<=7*60_000&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
+      const finished=job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
+      const url=job.result_chat_url||job.chat_url;
+      if(silent||finished) {
+        if(!url&&!silent)continue;
+        const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===task.device_id);
+        const source=this.#state.jobs.find(j=>j.id===chat?.source_job_id);
+        const aged=finished&&source&&now-Date.parse(source.created_at)>=BOOK_WINDOW_MS;
+        const count=continuationCount(chat?.continuation_count);
+        const replacement=silent||!url||aged||count===null||count>=MAX_CONTINUATIONS;
+        if(replacement&&task.last_replacement_at&&
+          now-Date.parse(task.last_replacement_at)<BOOK_SILENCE_MS)continue;
+        try {
+          const next=await this.#enqueue({action:url?'continue':'start',
+            ...(url?{chat_url:url}:{}),prompt:bookPrompt(task,task.index),device_id:task.device_id,
+            request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
+            book_activity_at_creation:activity?.last_operation_at||null,book_replacement:replacement,
+            book_stale:silent,book_window_age:!!aged,[BOOK_INTERNAL]:true});
+          task.job_id=next.job_id;task.last_enqueue_error=null;
+          if(replacement)task.last_replacement_at=new Date(now).toISOString();
+          changed=true;
+        } catch(err){task.last_enqueue_error=err.message;changed=true;}
+        continue;
+      }
+      // Page completion is evidence only for the end of ONE ChatGPT turn.
+      if(job.status==='sent'&&url&&!job.page_completed_at&&job.model_status!=='done') {
+        const recent=[...this.#state.jobs].reverse().find(j=>j.action==='reconcile'&&j.reconcile_of===job.id);
+        if(now-Date.parse(job.reported_at||job.created_at)>=30_000&&
+          (!recent||now-Date.parse(recent.created_at)>=60_000)) {
+          try {
+            await this.#enqueue({action:'reconcile',job_id:job.id,device_id:task.device_id,
+              book_task_id:task.id,request_id:'book-probe-'+job.id+'-'+Math.floor(now/60_000),
+              [BOOK_INTERNAL]:true});
+            changed=true;
+          } catch {} // Existing pending read-only probe is sufficient.
+        }
+      }
+    }
+    return changed;
+  }
+
   // Called by the ChatGPT conversation itself (see callbackFooter).
   async modelReport(data) {
     return this.#run(async()=>{
@@ -763,6 +982,9 @@ export class FileQueue {
       if(!MODEL_STATES.includes(data.status))throw Error('status must be started, progress, done, failed or blocked');
       const job=this.#state.jobs.find(j=>j.id===id&&(j.action==='start'||j.action==='continue'));
       if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
+      if(data.failure_kind!==undefined && (data.failure_kind!=='client_safety_rejection'||
+        data.status!=='blocked'||!job.book_task_id||typeof data.summary!=='string'||!data.summary.trim()))
+        throw Error('failure_kind requires blocked book report with exact refusal summary');
       const now=new Date(this.now()).toISOString();
       // A late "started" or "progress" never undoes a finished report.
       // done/failed are final; blocked is not: once the decision is given (in
@@ -777,6 +999,17 @@ export class FileQueue {
       if(typeof data.summary==='string') {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
+      }
+      if(data.failure_kind==='client_safety_rejection') {
+        const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
+          t.state==='active'&&t.index===job.book_index);
+        if(task) {
+          task.state='blocked';
+          task.terminal_summary='OpenAI client safety rejection: '+data.summary;
+          for(const pending of this.#state.jobs) if(pending.book_task_id===task.id&&pending.status==='queued')
+            Object.assign(pending,{status:'expired',reported_at:now,
+              message:'Cancelled after explicit client safety rejection'});
+        }
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
@@ -831,8 +1064,9 @@ export class FileQueue {
       const sends=job.action==='start'||job.action==='continue';
       const effectivePrompt=(job.handoff_prefix||'')+(job.prompt||'');
       return {...job,action:job.delivery_action||job.action,
+        ...(job.book_task_id?{slack_thread_url:null}:{}), // Book completion is posted once by relay, not by each ChatGPT turn.
         chat_url:job.delivery_action==='start'?null:job.chat_url,
-        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id):job.prompt,
+        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?BOOK_FOOTER:''):job.prompt,
         mention:sends?APP_NAME:undefined,
         own_text:sends?effectivePrompt:undefined,
         ...(job.action==='reconcile'?{verify_job_id:job.reconcile_of}:{} )}; // Browser sees one new-chat send, never the old tab
@@ -935,11 +1169,12 @@ export class FileQueue {
       }
       // A continue that could not be delivered must not lose the line of work:
       // start the same prompt in a new chat right away (owner decision, 22 Oct).
-      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id) {
+      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id&&!job.book_task_id) {
         const fallback={id:randomUUID(),action:'start',effort:job.effort,device_id:job.device_id,chat_url:null,
           prompt:'(Продолжение работы из чата '+job.chat_url+': продолжить там не удалось, поэтому задача запущена в новом окне.)\n\n'+job.prompt,
           slack_thread_url:job.slack_thread_url||null,request_id:'fallback-'+job.id,status:'queued',
           created_at:new Date(this.now()).toISOString(),fallback_of:job.id,
+          ...(job.book_task_id?{book_task_id:job.book_task_id}:{}),
           previous_chat_url:job.chat_url,handoff_reason:'definitely_blocked'};
         this.#state.jobs.push(fallback);
         job.fallback_job_id=fallback.id;
