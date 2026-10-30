@@ -15,7 +15,7 @@ const NEXT='https://chatgpt.com/c/11111111-2222-3333-4444-555555555555';
 const THIRD='https://chatgpt.com/c/99999999-aaaa-bbbb-cccc-dddddddddddd';
 const THREAD='https://mira-projects.slack.com/archives/C0C8RT9JB2P/p1792868771439369';
 const CONTINUE='Продолжай. Сначала book_ingest(status) по указанному ingestion_id. Принятые страницы не повторяй.';
-const DEVICE='test-device-token';
+const DEVICE='test-device-token-00000000000000000000';
 
 async function fixture(t) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-book-'));
@@ -76,7 +76,10 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   f.advance(21*60_000);
   await f.q.bookActivity({book_task_id:first.job_id,state:'unavailable'});
   await f.q.tick();
-  assert.equal(await f.q.claim('desktop'),null,'unavailable RKB never implies dead window');
+  const probe=await f.q.claim('desktop');
+  assert.ok(!probe||probe.action==='reconcile','unavailable RKB cannot start a replacement chat');
+  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'unknown'});
   await f.activity(first,'staged',previous);
   await Promise.all([f.q.tick(),f.q.tick()]);
   const replacement=await f.q.claim('desktop');
@@ -116,7 +119,10 @@ test('ordered books: only RKB finalized/done moves to next NEW chat, finally sto
   f.advance(25*60_000);
   await f.activity(first,'processing');
   await f.q.tick();
-  assert.equal(await f.q.claim('desktop'),null,'RKB processing/wait must not trigger stale chat');
+  const probe=await f.q.claim('desktop');
+  assert.ok(!probe||probe.action==='reconcile','RKB processing/wait cannot start a stale chat');
+  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:NEXT,
+    delivery_evidence:'unknown'});
   await f.activity(first,'finalized');
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.state,'done');
@@ -212,7 +218,10 @@ test('RKB failed/blocker stops list; processing/wait never means stale',async t=
   f.advance(22*60_000);
   await f.activity(first,'processing',new Date(f.now()-22*60_000).toISOString());
   await f.q.tick();
-  assert.equal(await f.q.claim('desktop'),null);
+  const probe=await f.q.claim('desktop');
+  assert.ok(!probe||probe.action==='reconcile','RKB processing state can only schedule read-only probe');
+  if(probe)await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'unknown'});
   await f.activity(first,'failed');
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.state,'blocked');
