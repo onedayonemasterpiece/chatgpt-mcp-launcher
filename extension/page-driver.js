@@ -480,6 +480,17 @@
     await sleep(1000);
     const text=lastReply();
     const busy=replyInProgress();
+    let unreadable='';
+    if(!text) {
+      const historyError=[...document.querySelectorAll('[role="alert"],[role="status"]')].filter(visible)
+        .some(n=>/Не удалось загрузить историю|Unable to load conversation|Failed to load conversation/i.test(n.textContent||''));
+      let frameMessages=0,inaccessibleFrames=0;
+      for(const frame of [...document.querySelectorAll('iframe')].slice(0,4)) {
+        try {const doc=frame.contentDocument;if(doc)frameMessages+=doc.querySelectorAll('[data-message-author-role]').length;
+          else inaccessibleFrames++;} catch {inaccessibleFrames++;}
+      }
+      unreadable=`; UI history_error=${historyError}, frame_messages=${frameMessages}, inaccessible_frames=${inaccessibleFrames}`;
+    }
     // The last user message shows whether a prompt sent earlier really arrived.
     const users=[...document.querySelectorAll('[data-message-author-role="user"]')];
     const asked=(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
@@ -491,7 +502,7 @@
       page_state:state,
       last_user_text:asked ? asked.slice(0,2000) : null,
       message:!text ? (document.querySelectorAll('[data-message-author-role]').length ? 'No ChatGPT reply in this conversation yet' :
-        'The conversation text is not readable on this page (ChatGPT markup); rely on model_status/model_summary from chatgpt_report') :
+        'The conversation text is not readable on this page; rely on model_status/model_summary from chatgpt_report')+unreadable :
         busy ? 'ChatGPT is still writing this reply; read again later' : 'Last ChatGPT reply read'};
   }
   globalThis.chatGPTLauncherRun = run;
