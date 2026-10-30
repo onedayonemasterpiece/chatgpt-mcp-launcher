@@ -138,6 +138,29 @@ for(const restDue of [false,true]) test(`legacy unfinished predecessor blocks ${
   }
 });
 
+for(const restDue of [false,true]) test(`blocked Stop cannot deadlock ${restDue?'rest':'book recovery'}`,async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const last=new Date(f.now()).toISOString();
+  f.advance((restDue?201:21)*60_000);
+  await f.activity(first,'staged',last);await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'blocked',chat_url:CHAT,
+    message:'Exact latest book turn or composer not confirmed'});
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).model_status,'started','blocked Stop is not invented model completion');
+  if(restDue) {
+    assert.ok(f.q.status(first.job_id).book_task.rest_until);
+    assert.equal(await f.q.claim('desktop'),null);
+    f.advance(35*60_000);await f.activity(first,'staged',last);await f.q.tick();
+  }
+  const next=await f.q.claim('desktop');
+  assert.equal(next.action,'start');
+  await f.q.tick();assert.equal(await f.q.claim('desktop'),null,'one successor after exhausted Stop');
+});
+
 test('uncertain book delivery cannot create a second writer before confirmed Stop',async t=>{
   const f=await fixture(t);
   const first=await f.start();

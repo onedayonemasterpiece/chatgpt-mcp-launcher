@@ -475,6 +475,7 @@
       return {status:'read',chat_url:chatUrl(),execution_evidence:'page_completed'};
     const buttons=[...document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop streaming"],'+
       'button[aria-label="Остановить потоковую передачу"],button[aria-label="Остановить"]')].filter(visible);
+    if(buttons.length===0&&!replyInProgress())return {status:'stopped',chat_url:chatUrl(),message:'Exact book turn is not generating'};
     if(buttons.length!==1)return {status:'blocked',chat_url:chatUrl(),message:'One active Stop control not found'};
     buttons[0].click(); // Real ChatGPT Stop, never close/reload the tab.
     for(let i=0;i<40;i++) {

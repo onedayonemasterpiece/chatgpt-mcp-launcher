@@ -216,15 +216,16 @@ export class FileQueue {
     return !!cycle && (cycle.resume_at>now ||
       (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
   }
-  #bookTurnStopped(job) {
-    return this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id&&j.status==='stopped');
+  #bookStopFinished(job) {
+    return this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id&&
+      ['stopped','read','blocked','needs_review','failed','expired'].includes(j.status));
   }
-  #bookTurnComplete(job) {
-    return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookTurnStopped(job);
+  #bookTurnReleased(job) {
+    return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookStopFinished(job);
   }
   #unfinishedBookTurns(task) {
     return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
-      ['start','continue'].includes(j.action)&&['claimed','sent','needs_review'].includes(j.status)&&!this.#bookTurnComplete(j));
+      ['start','continue'].includes(j.action)&&['claimed','sent','needs_review'].includes(j.status)&&!this.#bookTurnReleased(j));
   }
   #bookSilent(task,job,now) {
     const activity=task.activity;
@@ -933,7 +934,7 @@ export class FileQueue {
         for(const url of urls) {
           if(task.state==='active'&&url===current.result_chat_url)continue;
           if(task.state==='active'&&history.some(j=>j.book_task_id===task.id&&j.result_chat_url===url&&
-            ['start','continue'].includes(j.action)&&!this.#bookTurnComplete(j)))continue;
+            ['start','continue'].includes(j.action)&&!this.#bookTurnReleased(j)))continue;
           const previous=history.findLast(j=>j.action==='close'&&j.book_task_id===task.id&&j.chat_url===url);
           if(previous&&(['queued','claimed','closed'].includes(previous.status)||
             (previous.status==='blocked'&&previous.message?.includes('unsent draft'))))continue;
@@ -1032,7 +1033,7 @@ export class FileQueue {
       if(['queued','claimed'].includes(job.status))continue;
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
-      const complete=this.#bookTurnComplete(job);
+      const complete=this.#bookTurnReleased(job);
       const finished=runnable&&job.status==='sent'&&complete;
       // Silence permits an exact Stop attempt, never rest or a concurrent successor.
       const stale=this.#bookSilent(task,job,now);
@@ -1211,7 +1212,7 @@ export class FileQueue {
           (canonicalChatUrl(data.chat_url)!==job.chat_url||
             data.status==='read'&&data.execution_evidence!=='page_completed'))
         throw Error('Book Stop requires matching conversation and completion proof');
-      if(['open','read','close','refresh_tools'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
+      if(['open','read','close','refresh_tools','book_stop'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
       if(job.status!=='claimed' && !job.timed_out) {
         if(job.status===data.status) {

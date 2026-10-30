@@ -286,6 +286,9 @@ test('book-only Stop clicks only the exact latest running turn; unknown outcome 
   assert.equal(completed.status,'read');
   assert.equal(completed.execution_evidence,'page_completed');
   assert.equal(completed.stop_clicks,0,'finished turn does not need Stop');
+  const idle=await inspect({stop:true,user:'Import '+marker,generating:false});
+  assert.equal(idle.status,'stopped','exact idle turn does not require a nonexistent Stop button');
+  assert.equal(idle.stop_clicks,0);
   for(const sample of [
     {user:'Different job',assistant:'Partial',generating:true},
     {user:'Import '+marker,assistant:'Partial',generating:true,newerUser:true},
