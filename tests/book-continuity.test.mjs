@@ -214,6 +214,21 @@ test('one ingestion belongs to at most one live list, including its future books
   assert.equal(f.q.activeBooks()[0].book_task_id,first.job_id);
 });
 
+
+test('two concurrent book tasks on distinct ingestions remain independent',async t=>{
+  const f=await fixture(t);
+  const first=await f.start([{ingestion_id:ING1}],'pilot-window-one');
+  const second=await f.start([{ingestion_id:ING2}],'pilot-window-two');
+  assert.equal(f.q.activeBooks().length,2);
+  await f.deliver(first,CHAT);
+  await f.deliver(second,NEXT);
+  await f.activity(first,'finalized');
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.state,'done');
+  assert.equal(f.q.status(second.job_id).book_task.state,'active');
+  assert.deepEqual(f.q.activeBooks(),[{book_task_id:second.job_id,ingestion_id:ING2}]);
+});
+
 test('RKB failed/blocker stops list; processing/wait never means stale',async t=>{
   const f=await fixture(t);
   const first=await f.start();
