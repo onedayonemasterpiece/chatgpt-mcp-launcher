@@ -212,7 +212,8 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
     if(bookTicking)return;
     bookTicking=true;
     try {
-      if(bookActivityReader&&Date.now()-bookPolledAt>=5*60_000) {
+      const pollBooks=bookActivityReader&&Date.now()-bookPolledAt>=5*60_000;
+      if(pollBooks) {
         bookPolledAt=Date.now();
         for(const book of queue.activeBooks()) {
           try {
@@ -225,6 +226,7 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
         }
       }
       await queue.tick();
+      if(pollBooks)await queue.closeRetiredBookChats();
       if(bookNotifier)for(const notice of queue.pendingBookNotices()) {
         try {await bookNotifier(notice);await queue.bookNoticeSent(notice.book_task_id,notice.notice_id);}
         catch(err) {console.error('book Slack notice',err?.message);}

@@ -849,6 +849,30 @@ export class FileQueue {
     return this.#state.book_tasks.filter(t=>t.state==='active')
       .map(t=>({book_task_id:t.id,ingestion_id:t.books[t.index].ingestion_id}));
   }
+  async closeRetiredBookChats() {
+    return this.#run(async()=>{
+      const history=[...this.#state.request_receipts.map(r=>r.job),...this.#state.jobs];
+      for(const task of this.#state.book_tasks) {
+        const current=history.find(j=>j.id===task.job_id);
+        // Do not retire the predecessor until its replacement really arrived.
+        if(task.state==='active'&&!(current?.status==='sent'&&current.result_chat_url))continue;
+        const urls=new Set(history.filter(j=>j.book_task_id===task.id&&
+          ['start','continue'].includes(j.action)&&j.status==='sent').map(j=>j.result_chat_url).filter(Boolean));
+        for(const url of urls) {
+          if(task.state==='active'&&url===current.result_chat_url)continue;
+          const previous=history.findLast(j=>j.action==='close'&&j.book_task_id===task.id&&j.chat_url===url);
+          if(previous&&(['queued','claimed','closed'].includes(previous.status)||
+            (previous.status==='blocked'&&previous.message?.includes('unsent draft'))))continue;
+          try {
+            await this.#enqueue({action:'close',chat_url:url,device_id:task.device_id,
+              request_id:'book-close-'+chatIdFromUrl(url)+'-'+(previous?.id||task.id),
+              book_task_id:task.id,book_index:task.index,[BOOK_INTERNAL]:true});
+          } catch(err) {console.error('book tab cleanup',task.id,err.message);}
+        }
+      }
+      await this.#save();
+    });
+  }
   #bookPublic(task) {
     return {book_task_id:task.id,state:task.state,ingestion_id:task.books[task.index].ingestion_id,
       current_book_index:task.index,total_books:task.books.length,

@@ -229,7 +229,7 @@ async function closeChat(job,script) {
     else {await chrome.tabs.remove(tab.id);closed++;}
   }
   if(!closed) return {status:'blocked',chat_url:job.chat_url,message:'Tab left open: '+kept.join(', ')+'; try again later'};
-  return {status:'closed',chat_url:job.chat_url,
+  return {status:kept.length?'blocked':'closed',chat_url:job.chat_url,
     message:`Closed ${closed} tab(s)`+(kept.length?`; left open: ${kept.join(', ')}`:'')};
 }
 function validPluginUrl(url) {
