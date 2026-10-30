@@ -46,7 +46,8 @@ async function fixture(t) {
 test('page_completed starts a continuation in the SAME chat but never finalizes book',async t=>{
   const f=await fixture(t);
   const first=await f.start();
-  await f.deliver(first);
+  const initial=await f.deliver(first);
+  assert.match(initial.own_text,new RegExp(ING1),'first window receives its book selector');
   await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'started'});
   f.advance(31_000);
