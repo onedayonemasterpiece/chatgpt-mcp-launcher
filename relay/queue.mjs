@@ -336,7 +336,7 @@ export class FileQueue {
       const noPrompt=['open','read','close','reconcile','refresh_tools'].includes(action);
       if(action==='refresh_tools' && !PLUGIN_URL.test(args.plugin_url||''))
         throw Error('plugin_url must be https://chatgpt.com/settings/plugins-settings/plugin_<id>');
-      const prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
+      let prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
       const book=args.book;
       if(book!==undefined) {
         if(action!=='start')throw Error('book is only accepted by chatgpt_start');
@@ -352,6 +352,7 @@ export class FileQueue {
         }
         if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
           throw Error('Duplicate ingestion_id in book list');
+        prompt=bookPrompt({books:book.books,continuation_prompt:prompt},0);
       }
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
