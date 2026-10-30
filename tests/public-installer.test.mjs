@@ -9,7 +9,7 @@ test('public installer does not require Git or private repo access',()=>{
   assert.ok(!s.includes('git clone') && !s.includes('git fetch'));
 });
 test('scheduled update every fifteen minutes downloads only on SHA mismatch',()=>{
-  assert.ok(s.includes('/SC MINUTE /MO 15'));
+  assert.ok(s.includes('-RepetitionInterval ([TimeSpan]::FromMinutes(15))'));
   assert.ok(s.includes('if(Is-Installed $targetRevision)'));
   assert.ok(s.includes('background_sha256 = $backgroundHash'));
   assert.ok(s.includes('driver_sha256 = $driverHash'));
@@ -25,7 +25,7 @@ test('one-click update registers a per-user Windows protocol without accepting U
   assert.ok(s.includes('launch-update.vbs'));
   assert.ok(s.includes('sh.Run'));
   assert.ok(s.includes('0, False'));
-  assert.ok(s.includes('if($Install) { Install-Schedule }'));
+  assert.ok(s.includes('if($Install -or $Manual) { Install-Schedule }'));
   assert.ok(s.includes('Install-UpdateProtocol'));
   assert.ok(s.includes("'\" -Manual -Root \"'"),'button must launch a manual check distinct from scheduler');
   assert.ok(s.includes('trigger = $checkTrigger'));
