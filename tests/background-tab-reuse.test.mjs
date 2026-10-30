@@ -298,6 +298,17 @@ test('close-chat with no open tab is simply done',async()=>{
   assert.match(result.message,/No open tab/);
 });
 
+test('close-chat reports partial closure truthfully when another matching tab is still answering',async()=>{
+  const f=fixture([{id:44,url:CHAT},{id:45,url:CHAT},{id:46,url:OTHER}]);
+  const execute=f.sandbox.chrome.scripting.executeScript;
+  f.sandbox.chrome.scripting.executeScript=async params=>
+    params.target.tabId===45&&!params.files?[{result:{draft:false,answering:true}}]:execute(params);
+  const result=await f.execute({action:'close',chat_url:CHAT,id:'close-partial'});
+  assert.equal(result.status,'blocked');
+  assert.deepEqual(f.calls.removed,[44]);
+  assert.match(result.message,/still answering/);
+});
+
 test('refresh_tools opens the plugin settings page, presses once and closes the tab',async()=>{
   const PLUGIN='https://chatgpt.com/settings/plugins-settings/plugin_asdk_app_6ac1800f87d081918bf59ecffa242499';
   const f=fixture([{id:21,url:CHAT}],{driverResults:[{status:'refreshed',message:'Refresh tools pressed and finished'}]});

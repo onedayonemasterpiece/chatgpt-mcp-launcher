@@ -153,6 +153,46 @@ test('ordered books: only RKB finalized/done moves to next NEW chat, finally sto
   assert.equal(recovered.pendingBookNotices().length,0);
 });
 
+test('retired book tabs close after confirmed replacement or finalization, with durable busy retry',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  const oldOp=new Date(f.now()).toISOString();
+  f.advance(21*60_000);
+  await f.activity(first,'staged',oldOp);
+  await f.q.tick();
+  await f.q.closeRetiredBookChats();
+  const replacement=await f.q.claim('desktop');
+  assert.equal(replacement.action,'start');
+  assert.equal(await f.q.claim('desktop'),null,'unconfirmed replacement keeps predecessor tab');
+  await f.q.report('desktop',{job_id:replacement.id,status:'sent',chat_url:NEXT});
+  await f.q.closeRetiredBookChats();
+  const close=await f.q.claim('desktop');
+  assert.equal(close.action,'close');
+  assert.equal(close.chat_url,CHAT);
+  await f.q.closeRetiredBookChats();
+  assert.equal(await f.q.claim('desktop'),null,'only one pending close');
+  await f.q.report('desktop',{job_id:close.id,status:'blocked',chat_url:CHAT,message:'ChatGPT still answering'});
+  const recovered=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+  await recovered.initialize();
+  await recovered.closeRetiredBookChats();
+  const retry=await recovered.claim('desktop');
+  assert.equal(retry.action,'close');
+  assert.equal(retry.chat_url,CHAT);
+  await recovered.report('desktop',{job_id:retry.id,status:'closed',chat_url:CHAT});
+  await recovered.closeRetiredBookChats();
+  assert.equal(await recovered.claim('desktop'),null,'closed predecessor and active current tab stay untouched');
+  await recovered.bookActivity({book_task_id:first.job_id,state:'finalized',next_action:'done'});
+  await recovered.tick();
+  await recovered.closeRetiredBookChats();
+  const finished=await recovered.claim('desktop');
+  assert.equal(finished.action,'close');
+  assert.equal(finished.chat_url,NEXT,'finalization retires the last reader tab');
+  await recovered.report('desktop',{job_id:finished.id,status:'blocked',chat_url:NEXT,message:'Tab left open: unsent draft'});
+  await recovered.closeRetiredBookChats();
+  assert.equal(await recovered.claim('desktop'),null,'owner draft is left alone without repeated probes');
+});
+
 test('two confirmed replacements without a new RKB operation emit ONE warning, stay active, throttle 20min',async t=>{
   const f=await fixture(t);
   const first=await f.start();
