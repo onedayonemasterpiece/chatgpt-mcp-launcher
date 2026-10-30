@@ -1031,8 +1031,8 @@ export class FileQueue {
       const silent=(stale&&!MODEL_FINAL.includes(job.model_status)&&!job.page_completed_at)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
-      if(stale&&!complete&&job.status==='sent'&&url) {
-        if(!this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id)) {
+      if(stale&&!complete&&['sent','needs_review'].includes(job.status)) {
+        if(url&&!this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id)) {
           try {
             await this.#enqueue({action:'book_stop',chat_url:url,device_id:task.device_id,
               after_job_id:job.id,book_task_id:task.id,book_index:task.index,

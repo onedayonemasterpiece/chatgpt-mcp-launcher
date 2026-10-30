@@ -102,6 +102,25 @@ test('late model activity cannot occur inside nominal book rest: exact Stop prec
   assert.equal((await f.q.claim('desktop')).action,'start','only after all 35 minutes may the next book writer start');
 });
 
+test('uncertain book delivery cannot create a second writer before confirmed Stop',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  const claimed=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:claimed.id,status:'needs_review',chat_url:CHAT,
+    message:'Send may have succeeded, callback not received'});
+  const last=new Date(f.now()).toISOString();
+  f.advance(21*60_000);
+  await f.activity(first,'staged',last);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  assert.equal(await f.q.claim('desktop'),null);
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).action,'start');
+});
+
 test('Stop is book-only; active under 20 minutes and RKB processing never get interrupted',async t=>{
   const f=await fixture(t);
   const first=await f.start([{ingestion_id:ING1}],'stop-boundaries');
