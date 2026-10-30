@@ -99,6 +99,16 @@ Run `npm test` to test the relay, extension logic and version reporting; mock te
 После новой RKB-операции отсчёт начинается заново. Итоговая остановка
 способна отправить отдельное одно сообщение.
 
+**Явный отказ клиентской защиты OpenAI:** если именно клиент ChatGPT
+отклонил `book_ingest(stage)` **до** RKB handler, читатель сообщает
+`chatgpt_report(status="blocked", failure_kind="client_safety_rejection",
+summary="<точный текст отказа>")`. Только такое структурированное сообщение
+останавливает текущую book-task в существующем `blocked`, отменяет её
+**ещё не отправленные** продолжения и выдаёт одно терминальное уведомление.
+Обычные `done` и `blocked` без `failure_kind` не подменяют статус RKB.
+Причина клиентской блокировки не установлена; повтор через successor
+не является её исправлением ([RKB PR646](https://github.com/onedayonemasterpiece/regional-knowledge-base/pull/646)).
+
 **Конфигурация на сервере (только защищённый runtime конфиг):**
 
 - `LAUNCHER_RKB_ACTIVITY_URL=http://127.0.0.1:8000/internal/import/activity`
