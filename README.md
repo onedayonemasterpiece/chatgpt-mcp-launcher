@@ -52,3 +52,40 @@ Chrome must be open for an update to take effect; scheduled checks can run even 
 Only the Chrome device endpoints are exposed by the HTTPS proxy. MCP itself remains private. No API keys, passwords or cookies should ever be included in this repository. Source publication is separate from configuring the private relay and server infrastructure.
 
 Run `npm test` to test the relay, extension logic and version reporting; mock tests are not live ChatGPT acceptance.
+
+## RKB: автономное продолжение книги
+
+Для книги вызывайте **один** `chatgpt_start` с исходным `prompt`, долговечным
+`request_id`, `slack_thread_url` и объектом `book`: 
+
+~~~json
+{"book":{"ingestion_id":"<existing RKB ingestion UUID>",
+  "continuation_prompt":"Продолжай. Сначала book_ingest(status) по тому же ingestion_id; принятые страницы не повторяй."}}
+~~~
+
+Первый `job_id` также является `book_task_id`. Relay самостоятельно отправляет
+`continuation_prompt` в тот же чат после обычного `chatgpt_report(done)` за ход
+или доказанного `page_completed` (read-only PR 45). Пять продолжений, устаревшие
+счётчики и потолок окна 90 минут используют прежний successor. Второй скрипт не нужен.
+
+После *каждого хода* модель сообщает `chatgpt_report(status=done)` **без**
+`book_completed`. Только после завершения **всей книги** передаёт
+`status=done, book_completed=true`. Также останавливают задачу состояние RKB
+`complete/completed` или подтверждённый `blocked`.
+
+RKB activity: `GET /internal/import/activity?ingestion_id=…` (loopback, read-only).
+В защищённом конфиге relay: `LAUNCHER_RKB_ACTIVITY_URL=http://127.0.0.1:<port>/internal/import/activity`
+и `LAUNCHER_RKB_ACTIVITY_TOKEN` (principal `launcher-import-watch`). Опрос раз в 5 минут;
+если свежий ответ `state=staged/continue_pages` сообщает отсутствие операций
+`book_pages`/`book_ingest` более 20 минут, открывается один successor. Ошибка RKB
+устанавливает `unavailable`, **не** объявляя читателя мёртвым.
+
+Пока endpoint RKB не установлен, доверенный клиент может передавать
+`chatgpt_book_activity(book_task_id, state, last_operation_at)`. Без endpoint
+или таких данных Launcher не может доказать 20 минут тишины; продолжение
+по `page_completed` и `chatgpt_report(done)` при этом продолжает работать.
+
+Для одного завершающего сообщения в тред укажите защищённый
+`LAUNCHER_SLACK_BOT_TOKEN` с правом записи в `slack_thread_url`.
+Квитанция хранится в прежнем файле очереди. Slack получает постоянный
+`client_msg_id=book_task_id`; текст книги и секреты в сообщения не передаются.
