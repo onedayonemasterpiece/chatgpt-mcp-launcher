@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FileQueue} from '../relay/queue.mjs';
@@ -68,6 +68,164 @@ test('30-minute active reading creates no browser probes or short tasks; real tu
   assert.equal(await f.q.claim('desktop'),null,'one in-flight continuation');
 });
 
+test('late model activity cannot occur inside nominal book rest: exact Stop precedes the full rest',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start([{ingestion_id:ING1}],'late-thinking');
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const oldOperation=new Date(f.now()).toISOString();
+  f.advance(3*60*60_000+21*60_000);
+  await f.activity(first,'staged',oldOperation);
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,
+    '20m RKB silence never proves an ongoing model turn finished');
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  assert.equal(stop.chat_url,CHAT);
+  assert.equal(await f.q.claim('desktop'),null,'no second book writer before Stop');
+  await f.q.modelReport({job_id:first.job_id,status:'progress',summary:'Still reading the next page'});
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,
+    'late started/progress activity is still within the original turn');
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
+  const expected=new Date(f.now()+35*60_000).toISOString();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,expected);
+  assert.equal(await f.q.claim('desktop'),null,'stop is a completion proof, not a new book delivery');
+  f.advance(34*60_000);
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null);
+  f.advance(60_000);
+  await f.activity(first,'staged',oldOperation);
+  await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).action,'start','only after all 35 minutes may the next book writer start');
+});
+
+for(const restDue of [false,true]) test(`legacy unfinished predecessor blocks ${restDue?'rest':'new writer'} until exact Stop`,async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const last=new Date(f.now()).toISOString();
+  f.advance((restDue?201:21)*60_000);
+  await f.activity(first,'staged',last);
+  // Persisted state made by the old relay: a successor exists without proof
+  // that the predecessor stopped; the successor itself then reported blocked.
+  const state=JSON.parse(await readFile(f.file,'utf8'));
+  const prior=state.jobs.find(j=>j.id===first.job_id);
+  const successor={...prior,id:'bbbbbbbb-1111-2222-3333-cccccccccccc',
+    chat_url:NEXT,result_chat_url:NEXT,model_status:'blocked',
+    created_at:new Date(f.now()).toISOString()};
+  state.jobs.push(successor);state.book_tasks[0].job_id=successor.id;
+  await writeFile(f.file,JSON.stringify(state));
+  const q=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0});
+  await q.initialize();
+  await q.closeRetiredBookChats();
+  await q.tick();
+  assert.equal(q.status(first.job_id).book_task.rest_until,null);
+  const stop=await q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  assert.equal(await q.claim('desktop'),null);
+  await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await q.tick();
+  if(restDue)assert.ok(q.status(first.job_id).book_task.rest_until);
+  else {
+    const next=await q.claim('desktop');
+    assert.ok(['start','continue'].includes(next.action));
+    assert.equal(next.book_task_id,first.job_id);
+  }
+});
+
+for(const restDue of [false,true]) test(`blocked Stop cannot deadlock ${restDue?'rest':'book recovery'}`,async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const last=new Date(f.now()).toISOString();
+  f.advance((restDue?201:21)*60_000);
+  await f.activity(first,'staged',last);await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'blocked',chat_url:CHAT,
+    message:'Exact latest book turn or composer not confirmed'});
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).model_status,'started','blocked Stop is not invented model completion');
+  if(restDue) {
+    assert.ok(f.q.status(first.job_id).book_task.rest_until);
+    assert.equal(await f.q.claim('desktop'),null);
+    f.advance(35*60_000);await f.activity(first,'staged',last);await f.q.tick();
+  }
+  const next=await f.q.claim('desktop');
+  assert.equal(next.action,'start');
+  await f.q.tick();assert.equal(await f.q.claim('desktop'),null,'one successor after exhausted Stop');
+});
+
+test('uncertain book delivery cannot create a second writer before confirmed Stop',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  const claimed=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:claimed.id,status:'needs_review',chat_url:CHAT,
+    message:'Send may have succeeded, callback not received'});
+  const last=new Date(f.now()).toISOString();
+  f.advance(21*60_000);
+  await f.activity(first,'staged',last);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  assert.equal(await f.q.claim('desktop'),null);
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).action,'start');
+});
+
+test('Stop is book-only; active under 20 minutes and RKB processing never get interrupted',async t=>{
+  const f=await fixture(t);
+  const first=await f.start([{ingestion_id:ING1}],'stop-boundaries');
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const last=new Date(f.now()).toISOString();
+  f.advance(19*60_000);
+  await f.activity(first,'staged',last);
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'active model before 20m is not stopped');
+  await assert.rejects(f.q.enqueue({action:'book_stop',chat_url:CHAT,after_job_id:first.job_id,
+    book_task_id:first.job_id}),/Invalid action/,'no public Stop API');
+  f.advance(2*60_000);
+  await f.activity(first,'staged',last);
+  await f.q.tick();
+  await f.activity(first,'processing',last);
+  const ordinary=await f.q.enqueue({action:'start',prompt:'Unrelated DEV task',request_id:'dev-normal'});
+  const claimed=await f.q.claim('desktop');
+  assert.equal(claimed.id,ordinary.job_id,'a queued Stop is dropped if RKB starts processing');
+  f.advance(3*60*60_000);
+  await f.activity(first,'processing',last);
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null);
+});
+
+test('page-completed browser proof avoids Stop; mismatched Stop report cannot start rest',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start([{ingestion_id:ING1}],'stop-page-proof');
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const old=new Date(f.now()).toISOString();
+  f.advance(3*60*60_000+21*60_000);
+  await f.activity(first,'staged',old);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await assert.rejects(f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:NEXT}),
+    /matching conversation/);
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null);
+  await f.q.report('desktop',{job_id:stop.id,status:'read',chat_url:CHAT,
+    execution_evidence:'page_completed'});
+  assert.ok(f.q.status(first.job_id).page_completed_at);
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
+});
+
 test('20 minutes only with staged/continue_pages and RKB last_operation_at: one successor',async t=>{
   const f=await fixture(t);
   const first=await f.start();
@@ -80,6 +238,11 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   assert.equal(await f.q.claim('desktop'),null,'unavailable RKB cannot start a replacement or browser probe');
   await f.activity(first,'staged',previous);
   await Promise.all([f.q.tick(),f.q.tick()]);
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  assert.equal(stop.after_job_id,first.job_id);
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
   const replacement=await f.q.claim('desktop');
   assert.equal(replacement.action,'start');
   assert.equal(replacement.previous_chat_url,CHAT);
@@ -161,6 +324,10 @@ test('retired book tabs close after confirmed replacement or finalization, with 
   f.advance(21*60_000);
   await f.activity(first,'staged',oldOp);
   await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
   await f.q.closeRetiredBookChats();
   const replacement=await f.q.claim('desktop');
   assert.equal(replacement.action,'start');
@@ -203,6 +370,10 @@ test('two confirmed replacements without a new RKB operation emit ONE warning, s
     f.advance(21*60_000);
     await f.activity(first,'staged',oldOp);
     await f.q.tick();
+    const stop=await f.q.claim('desktop');
+    assert.equal(stop.action,'book_stop');
+    await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:index===1?CHAT:NEXT});
+    await f.q.tick();
     const replacement=await f.q.claim('desktop');
     assert.equal(replacement.action,'start');
     assert.equal(replacement.handoff_reason,'book_silent');
@@ -234,6 +405,10 @@ test('book continuations stay in the same chat past five turns until its 90-minu
   const oldOp=new Date(f.now()-60_000).toISOString();
   f.advance(21*60_000);
   await f.activity(first,'staged',oldOp);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
   await f.q.tick();
   const replacement=await f.q.claim('desktop');
   await f.q.report('desktop',{job_id:replacement.id,status:'sent',chat_url:NEXT});
@@ -582,6 +757,11 @@ test('processing/wait stays active after deadline; staged plus real 20m RKB sile
   assert.equal(await f.q.claim('desktop'),null,'deadline already prevents new book work');
   await f.activity(first,'staged',originalOperation);
   await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,'silence alone is not completion');
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop.action,'book_stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+  await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.rest_until,
-    new Date(f.now()+35*60_000).toISOString(),'existing silent staged rule permits rest without waiting forever');
+    new Date(f.now()+35*60_000).toISOString(),'rest starts only after Stop confirmation');
 });

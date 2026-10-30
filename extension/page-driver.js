@@ -460,6 +460,36 @@
         evidence_kind==='unconfirmed'?'No positive delivery evidence; original job remains uncertain':
         'Original job marker was observed; assistant completion is not proven'};
   }
+  async function stopBook(job) {
+    // Private book-only action: verify the exact latest user turn before Stop.
+    if(job?.action!=='book_stop'||!/^[0-9a-f-]{36}$/i.test(job.after_job_id||'')||
+        !isConversationUrl(window.location.href))return {status:'blocked',message:'Invalid book Stop target'};
+    const proof=await reconcile({action:'reconcile',verify_job_id:job.after_job_id});
+    const users=[...document.querySelectorAll('[data-message-author-role="user"]')];
+    const latest=users.at(-1);
+    if(proof.delivery_evidence!=='sent'||proof.evidence_kind!=='user_message_marker'||
+        !visible(latest)||!latest.innerText?.includes('job_id='+job.after_job_id)||
+        !composer()||draftText(composer()).trim())
+      return {status:'blocked',chat_url:chatUrl(),message:'Exact latest book turn or composer not confirmed'};
+    if(proof.execution_evidence==='page_completed')
+      return {status:'read',chat_url:chatUrl(),execution_evidence:'page_completed'};
+    const buttons=[...document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop streaming"],'+
+      'button[aria-label="Остановить потоковую передачу"],button[aria-label="Остановить"]')].filter(visible);
+    if(buttons.length===0&&!replyInProgress())return {status:'stopped',chat_url:chatUrl(),message:'Exact book turn is not generating'};
+    if(buttons.length!==1)return {status:'blocked',chat_url:chatUrl(),message:'One active Stop control not found'};
+    buttons[0].click(); // Real ChatGPT Stop, never close/reload the tab.
+    for(let i=0;i<40;i++) {
+      await sleep(250);
+      if(!replyInProgress()) {
+        const after=await reconcile({action:'reconcile',verify_job_id:job.after_job_id});
+        if(after.delivery_evidence==='sent'&&after.evidence_kind==='user_message_marker'&&
+          [...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.innerText?.includes('job_id='+job.after_job_id))
+          return {status:'stopped',chat_url:chatUrl(),message:'Exact book turn stopped in ChatGPT UI'};
+        break;
+      }
+    }
+    return {status:'needs_review',chat_url:chatUrl(),message:'Stop clicked, but exact turn completion not confirmed'};
+  }
   function lastReply() {
     const replies=[...document.querySelectorAll('[data-message-author-role="assistant"]')];
     const text=(replies.at(-1)?.innerText || replies.at(-1)?.textContent || '').trim();
@@ -508,6 +538,7 @@
   globalThis.chatGPTLauncherRun = run;
   globalThis.chatGPTLauncherRead = read;
   globalThis.chatGPTLauncherReconcile = reconcile;
+  globalThis.chatGPTLauncherStopBook = stopBook;
   globalThis.chatGPTLauncherProbe = () => {
     const el=composer();
     return {draft:!!(el && draftText(el).trim()),answering:replyInProgress()};

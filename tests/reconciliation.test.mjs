@@ -207,7 +207,8 @@ test('read exposes categorical page state even when conversation messages are un
 });
 function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,
-                  mainEditable='',userEditable='',mainHidden='',userHidden=''}={}) {
+                  mainEditable='',userEditable='',mainHidden='',userHidden='',
+                  stop=false,stopNoEffect=false,newerUser=false}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
     innerText:draft,textContent:draft,isConnected:true,
     getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null};
@@ -247,16 +248,22 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
   const assistantNode=node(assistant);
   assistantNode.getAttribute=name=>name==='data-message-author-role'?'assistant':null;
   const another=ambiguousComposer?{...editor}:null;
+  const extraUser=node('A newer unrelated turn');
+  extraUser.getAttribute=name=>name==='data-message-author-role'?'user':null;
+  let stopVisible=generating,stopClicks=0;
+  const stopButton={isConnected:true,getBoundingClientRect:()=>rect(false),
+    click:()=>{stopClicks++;if(!stopNoEffect)stopVisible=false;}};
   const document={
     querySelectorAll(selector){
       if(selector==='[contenteditable="true"],textarea')
         return ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
       if(selector==='[data-message-author-role="user"]')
-        return user||userEditable||userHidden?[userNode]:[];
+        return [...(user||userEditable||userHidden?[userNode]:[]),...(newerUser?[extraUser]:[])];
       if(selector==='[data-message-author-role="user"],[data-message-author-role="assistant"]')
-        return [...(user||userEditable||userHidden?[userNode]:[]),...(assistant?[assistantNode]:[])];
-      if(selector.includes('stop-button'))return generating?[{isConnected:true,getBoundingClientRect:()=>rect(false)}]:[];
+        return [...(user||userEditable||userHidden?[userNode]:[]),...(newerUser?[extraUser]:[]),
+          ...(assistant?[assistantNode]:[])];
+      if(selector.includes('stop-button'))return stopVisible?[stopButton]:[];
       return [];
     }
   };
@@ -265,8 +272,38 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
     globalThis:null,URL:globalThis.URL,setTimeout:fn=>{queueMicrotask(fn);return 1;}};
   context.globalThis=context;
   runInNewContext(driver,context,{timeout:2000});
+  if(stop)return context.chatGPTLauncherStopBook({action:'book_stop',after_job_id:ID})
+    .then(result=>({...result,stop_clicks:stopClicks}));
   return context.chatGPTLauncherReconcile({action:'reconcile',verify_job_id:ID});
 }
+test('book-only Stop clicks only the exact latest running turn; unknown outcome never passes',async()=>{
+  const marker='job_id='+ID;
+  const stopped=await inspect({stop:true,user:'Import '+marker,assistant:'Partial page',generating:true});
+  assert.equal(stopped.status,'stopped');
+  assert.equal(stopped.stop_clicks,1);
+  assert.equal(JSON.stringify(stopped).includes('Partial page'),false);
+  const completed=await inspect({stop:true,user:'Import '+marker,assistant:'Finished page'});
+  assert.equal(completed.status,'read');
+  assert.equal(completed.execution_evidence,'page_completed');
+  assert.equal(completed.stop_clicks,0,'finished turn does not need Stop');
+  const idle=await inspect({stop:true,user:'Import '+marker,generating:false});
+  assert.equal(idle.status,'stopped','exact idle turn does not require a nonexistent Stop button');
+  assert.equal(idle.stop_clicks,0);
+  for(const sample of [
+    {user:'Different job',assistant:'Partial',generating:true},
+    {user:'Import '+marker,assistant:'Partial',generating:true,newerUser:true},
+    {user:'Import '+marker,assistant:'Partial',generating:true,draft:'Owner draft'},
+    {user:'Import '+marker,assistant:'Partial',generating:true,wrongPage:true}
+  ]) {
+    const result=await inspect({...sample,stop:true});
+    assert.equal(result.status,'blocked');
+    assert.equal(result.stop_clicks,0,'no foreign or ambiguous turn is stopped');
+  }
+  const unknown=await inspect({stop:true,user:'Import '+marker,assistant:'Partial',generating:true,stopNoEffect:true});
+  assert.equal(unknown.status,'needs_review');
+  assert.equal(unknown.stop_clicks,1,'click attempted exactly once without false confirmation');
+});
+
 test('read-only browser probe accepts exact user marker; never returns conversation content',async()=>{
   const result=await inspect({user:'Hello job_id='+ID+' done',main:'unrelated'});
   assert.equal(result.delivery_evidence,'sent');
