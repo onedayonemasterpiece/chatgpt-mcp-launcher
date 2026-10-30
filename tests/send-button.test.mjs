@@ -172,7 +172,7 @@ test('a new chat reports the final slug, never a temporary local or intermediate
  assert.equal(f.state.clicks,1);
 });
 
-function readFixture({replies=[],streaming=false,href='https://chatgpt.com/c/abcd1234'}={}) {
+function readFixture({replies=[],streaming=false,historyError=false,frames=[],href='https://chatgpt.com/c/abcd1234'}={}) {
  const visible=()=>({width:160,height:34});
  const state={clicks:0,insertions:0};
  const editor={id:'prompt-textarea',innerText:'',textContent:'',isConnected:true,getBoundingClientRect:visible,
@@ -183,6 +183,9 @@ function readFixture({replies=[],streaming=false,href='https://chatgpt.com/c/abc
      if(selector==='[contenteditable="true"],textarea') return [editor];
      if(selector==='[data-message-author-role="assistant"]') return replies.map(text=>({innerText:text}));
      if(selector.includes('stop-button')) return streaming?[stop]:[];
+     if(selector==='iframe') return frames;
+     if(selector==='[role="alert"],[role="status"]') return historyError?
+       [{isConnected:true,getBoundingClientRect:visible,textContent:'Не удалось загрузить историю private-details'}]:[];
      return [];
    },
    execCommand:()=>{state.insertions++;return true;}
@@ -213,7 +216,19 @@ test('read reports a reply that is still being written, and an empty chat',async
  assert.equal(empty.status,'read');
  assert.equal(empty.reply_text,null);
  const wrong=await readFixture({href:'https://chatgpt.com/'}).read({action:'read'});
- assert.equal(wrong.status,'blocked');
+  assert.equal(wrong.status,'blocked');
+});
+
+test('unreadable chat reports only history-error and bounded frame counts without clicking',async()=>{
+ const frames=[{contentDocument:{querySelectorAll:()=>[{innerText:'private-message'},{}]}},
+   {get contentDocument(){throw Error('private-cross-origin-url');}},
+   {contentDocument:null},{contentDocument:null},{contentDocument:{querySelectorAll:()=>Array(50)}}];
+ const f=readFixture({historyError:true,frames,streaming:true});
+ const result=await f.read({action:'read'});
+ assert.equal(result.reply_text,null);assert.equal(result.reply_generating,true);
+ assert.match(result.message,/history_error=true, frame_messages=2, inaccessible_frames=3/);
+ assert.equal(result.message.includes('private'),false);
+ assert.equal(f.state.clicks+f.state.insertions,0);
 });
 
 
