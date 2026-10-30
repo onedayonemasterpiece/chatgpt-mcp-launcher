@@ -17,6 +17,7 @@ const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
 const BOOK_SILENCE_MS = 20 * 60_000;
 const BOOK_WINDOW_MS = 90 * 60_000;
+const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
@@ -323,6 +324,7 @@ export class FileQueue {
   async enqueue(args) { return this.#run(()=>this.#enqueue(args)); }
   async #enqueue(args) {
       const action=args.action;
+      const internalBook=args[BOOK_INTERNAL]===true;
       if(!['start','continue','open','read','close','reconcile','refresh_tools'].includes(action))throw Error('Invalid action');
       const noPrompt=['open','read','close','reconcile','refresh_tools'].includes(action);
       if(action==='refresh_tools' && !PLUGIN_URL.test(args.plugin_url||''))
@@ -359,11 +361,16 @@ export class FileQueue {
       if(args.slack_thread_url!==undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url))
         throw Error('Invalid Slack thread URL');
       const requestId=args.request_id===undefined?undefined:requireString(args.request_id,'request_id',128);
+      const sameBook=j=>{
+        const task=this.#state.book_tasks.find(t=>t.id===j.id);
+        return book?task?.ingestion_id===book.ingestion_id&&
+          task?.continuation_prompt===book.continuation_prompt:!task;
+      };
       if(requestId) {
         const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
         if(existing) {
           if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target||
-            (action==='reconcile'&&existing.reconcile_of!==reviewSource.id))
+            (action==='reconcile'&&existing.reconcile_of!==reviewSource.id)||!sameBook(existing))
             throw Error('Idempotency key belongs to a different operation');
           return this.#public(existing);
         }
@@ -372,12 +379,12 @@ export class FileQueue {
         const receipt=this.#state.request_receipts.find(r=>r.device_id===deviceId&&r.request_id===requestId);
         if(receipt) {
           if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt)||
-            (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id))
+            (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id)||!sameBook(receipt.job))
             throw Error('Idempotency key belongs to a different operation');
           return {...this.#public(receipt.job),archived:true};
         }
       }
-      const bookProbe=action==='reconcile'&&!!args.book_task_id&&
+      const bookProbe=action==='reconcile'&&internalBook&&!!args.book_task_id&&
         args.book_task_id===reviewSource?.book_task_id&&
         reviewSource?.status==='sent'&&!reviewSource?.page_completed_at;
       if(action==='reconcile' && !bookProbe && reviewSource.status!=='needs_review' &&
@@ -393,7 +400,7 @@ export class FileQueue {
       }
       // Serialized with enqueue/report/modelReport: a pending or uncertain send
       // reserves the chat until a definite outcome, including across restarts.
-      if(action==='continue'&&!args.book_stale) {
+      if(action==='continue'&&!(internalBook&&args.book_stale)) {
         const same=[...this.#state.jobs].reverse().filter(j=>
           (j.action==='start'||j.action==='continue')&&
           ((j.result_chat_url||j.chat_url)===target||j.previous_chat_url===target));
@@ -417,14 +424,15 @@ export class FileQueue {
           '. Follow its new chat_id instead of creating a second successor.');
       }
       const count=continuationCount(existingChat?.continuation_count);
-      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS||args.book_stale||args.book_window_age);
+      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS||
+        (internalBook&&(args.book_stale||args.book_window_age)));
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
       const jobId=randomUUID();
       const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId):null;
       // Reject before queue admission: this exact payload is what Chrome's
       // preparePrompt validates, including the callback footer added at claim.
       if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
-        ((book||args.book_task_id)?BOOK_FOOTER.length:0)>MAX_PROMPT)
+        ((book||(internalBook&&args.book_task_id))?BOOK_FOOTER.length:0)>MAX_PROMPT)
         throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
         // Never evict an ambiguous send: losing that receipt could authorize a
@@ -451,10 +459,10 @@ export class FileQueue {
         id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
-        ...((book||args.book_task_id)?{book_task_id:book?jobId:args.book_task_id}:{}),
+        ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
-          handoff_prefix:prefix,handoff_reason:args.book_stale?'book_silent':args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
+          handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
       };
       this.#state.jobs.push(job);
       if(book) this.#state.book_tasks.push({id:jobId,ingestion_id:book.ingestion_id,device_id:deviceId,
@@ -869,7 +877,7 @@ export class FileQueue {
           const next=await this.#enqueue({action:url?'continue':'start',
             ...(url?{chat_url:url}:{}),prompt:task.continuation_prompt,device_id:task.device_id,
             request_id:'book-next-'+job.id,slack_thread_url:task.slack_thread_url||undefined,
-            book_task_id:task.id,book_stale:silent,book_window_age:!!aged});
+            book_task_id:task.id,book_stale:silent,book_window_age:!!aged,[BOOK_INTERNAL]:true});
           task.job_id=next.job_id;changed=true;
         } catch(err) {
           task.state='blocked';task.terminal_summary='Launcher cannot schedule next book turn: '+err.message;
@@ -885,7 +893,8 @@ export class FileQueue {
           (!recent||now-Date.parse(recent.created_at)>=60_000)) {
           try {
             await this.#enqueue({action:'reconcile',job_id:job.id,device_id:task.device_id,
-              book_task_id:task.id,request_id:'book-probe-'+job.id+'-'+Math.floor(now/60_000)});
+              book_task_id:task.id,request_id:'book-probe-'+job.id+'-'+Math.floor(now/60_000),
+              [BOOK_INTERNAL]:true});
           } catch {} // An existing pending read-only probe is sufficient.
         }
       }
