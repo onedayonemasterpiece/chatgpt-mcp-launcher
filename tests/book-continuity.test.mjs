@@ -48,6 +48,8 @@ test('completed assistant page automatically continues in same chat without mode
   assert.equal(next.action,'continue');
   assert.equal(next.chat_url,CHAT);
   assert.match(next.own_text,/book_ingest\(status\)/);
+  assert.equal(next.slack_thread_url,null,'do not ask ChatGPT to post every book turn in Slack');
+  assert.match(next.prompt,/единственный итог по книге отправляет Launcher/);
   assert.equal(f.q.status(first.job_id).book_task.current_job_id,next.id);
   await f.q.tick();
   assert.equal(await f.q.claim('desktop'),null,'no concurrent duplicate continuation');
@@ -102,8 +104,11 @@ test('duplicate starts or ticks never produce two active chats for one ingestion
   const f=await fixture(t);
   const first=await f.start();
   assert.equal((await f.start()).job_id,first.job_id,'durable request_id');
+  await assert.rejects(f.start('changed-ingestion','book-1'),/Idempotency key/);
   await assert.rejects(f.start('ingestion-1','different-key'),/already has an active book task/);
   await f.deliver(first);
+  await assert.rejects(f.q.enqueue({action:'continue',chat_ref:CHAT,prompt:'unsafe',
+    book_stale:true}),/unconfirmed|still working/,'caller cannot bypass in-flight guard');
   await f.q.modelReport({job_id:first.job_id,status:'done'});
   await Promise.all([f.q.tick(),f.q.tick(),f.q.tick()]);
   const next=await f.q.claim('desktop');
