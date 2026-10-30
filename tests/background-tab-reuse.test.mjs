@@ -319,3 +319,20 @@ test('refresh_tools opens the plugin settings page, presses once and closes the 
   assert.deepEqual(f.calls.removed,[100],'only the plugin tab is closed, never a chat');
   await assert.rejects(f.execute({action:'refresh_tools',chat_url:CHAT,id:'bad'}),/plugin settings URL/);
 });
+
+test('missing refresh button reports bounded visible labels and path without clicking',async()=>{
+  const f=fixture();let clicks=0;
+  f.sandbox.location={pathname:'/settings/plugins-settings/plugin_fixture',search:'?private=omitted'};
+  const button=(text,visible=true)=>({textContent:text,getClientRects:()=>visible?[{}]:[],
+    getAttribute:()=>null,click:()=>clicks++});
+  f.sandbox.document={querySelectorAll:()=>[button('Reconnect'),button('hidden-secret',false),
+    ...Array.from({length:15},()=>button('x'.repeat(100)))]};
+  const result=await f.sandbox.pressRefreshTools();
+  assert.equal(result.status,'blocked');assert.equal(clicks,0);
+  assert.match(result.message,/Path: \/settings\/plugins-settings\/plugin_fixture/);
+  const labels=JSON.parse(result.message.split('visible button labels: ')[1]);
+  assert.equal(labels.length,12);assert.equal(labels[0],'Reconnect');
+  assert.ok(labels.every(label=>label.length<=60));
+  assert.equal(result.message.includes('hidden-secret'),false);
+  assert.equal(result.message.includes('private=omitted'),false);
+});

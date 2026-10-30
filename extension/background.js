@@ -244,7 +244,12 @@ async function pressRefreshTools() {
   const find=()=>[...document.querySelectorAll('button')].find(b=>label.test((b.textContent||'').trim()));
   let button=null;
   for(let i=0;i<60&&!button;i++){button=find();if(!button)await sleep(500);}
-  if(!button) return {status:'blocked',message:'Refresh tools button not found on the plugin page; nothing was pressed'};
+  if(!button) {
+    const labels=[...document.querySelectorAll('button')].filter(b=>b.getClientRects().length)
+      .slice(0,12).map(b=>(b.textContent||b.getAttribute('aria-label')||'').trim().slice(0,60));
+    return {status:'blocked',message:'Refresh tools button not found; nothing was pressed. Path: '+
+      location.pathname+'; visible button labels: '+JSON.stringify(labels)};
+  }
   button.click();
   await sleep(10000);
   let ready=false;
