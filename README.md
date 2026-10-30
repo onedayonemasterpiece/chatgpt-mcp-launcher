@@ -26,6 +26,9 @@ If an old Launcher is already loaded from a different folder, disable the old ex
 
 Windows Task Scheduler checks the public GitHub commit SHA **once every 15 minutes**. When unchanged, no code is downloaded or installed; there is no continuously running local process and no Git requirement. Only when the SHA changes does the updater fetch the small ZIP archive, verify the locally written files and update the unpacked extension. Chrome automatically reloads when it observes the version marker.
 
+The update task uses the configured installation directory and runs on battery power too.
+Installation and a completed manual check refresh this task registration.
+
 ### Manual update from Chrome
 
 Open the extension popup and select **«Проверить и установить обновления»**. The button uses the Windows protocol `chatgpt-mcp-update://check` registered for your current user by `install.ps1 -Install`, and launches a **hidden, short-lived Windows Script Host** updater. Chrome may ask to confirm opening the registered Windows app; accept to proceed. A PowerShell window should not appear. The popup reads a tiny local status file while open and reports **checking**, **no updates/current**, **updated**, or **error**. If the popup closes, reopen it to see the latest recorded result. The updater checks the public GitHub SHA and downloads code **only when a new commit exists**. It does not need a resident background process, Git, an admin account or dot.

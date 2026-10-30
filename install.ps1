@@ -93,9 +93,13 @@ function Is-Installed([string]$Revision) {
 }
 function Install-Schedule {
   if(!(Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'updater_script_missing' }
-  $taskRun = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$updater+'" -Check'
+  $taskRun = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$updater+'" -Check -Root "'+$Root+'"'
   & schtasks.exe /Create /F /SC MINUTE /MO 15 /TN $taskName /TR $taskRun | Out-Null
   if($LASTEXITCODE -ne 0) { throw 'windows_scheduler_registration_failed' }
+  $settings = (Get-ScheduledTask -TaskName $taskName).Settings
+  $settings.DisallowStartIfOnBatteries = $false
+  $settings.StopIfGoingOnBatteries = $false
+  Set-ScheduledTask -TaskName $taskName -Settings $settings | Out-Null
   Write-Host 'Scheduled update check installed (every 15 minutes).'
 }
 function Install-UpdateProtocol {
@@ -230,7 +234,7 @@ try {
     Report-Status 'updated'
     Write-Host ('Installed GitHub revision: '+$targetRevision)
   }
-  if($Install) { Install-Schedule }
+  if($Install -or $Manual) { Install-Schedule }
   # Self-heal the native button handler on normal scheduled/manual checks too.
   Install-UpdateProtocol
   Write-Host ('Chrome unpacked extension: '+$ext)

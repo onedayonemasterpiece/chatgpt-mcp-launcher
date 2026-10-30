@@ -25,7 +25,7 @@ test('one-click update registers a per-user Windows protocol without accepting U
   assert.ok(s.includes('launch-update.vbs'));
   assert.ok(s.includes('sh.Run'));
   assert.ok(s.includes('0, False'));
-  assert.ok(s.includes('if($Install) { Install-Schedule }'));
+  assert.ok(s.includes('if($Install -or $Manual) { Install-Schedule }'));
   assert.ok(s.includes('Install-UpdateProtocol'));
   assert.ok(s.includes("'\" -Manual -Root \"'"),'button must launch a manual check distinct from scheduler');
   assert.ok(s.includes('trigger = $checkTrigger'));

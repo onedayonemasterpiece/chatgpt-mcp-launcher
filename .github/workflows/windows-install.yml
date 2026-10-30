@@ -16,6 +16,9 @@ jobs:
       - name: Run Node regression tests
         shell: pwsh
         run: npm test
+      - name: Verify scheduled updater conditions and installation root
+        shell: powershell
+        run: .\tests\windows-update-schedule.ps1
       - name: Install and verify no-admin updater
         if: github.event_name != 'pull_request'
         shell: powershell
