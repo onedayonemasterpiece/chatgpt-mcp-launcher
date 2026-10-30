@@ -93,13 +93,12 @@ function Is-Installed([string]$Revision) {
 }
 function Install-Schedule {
   if(!(Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'updater_script_missing' }
-  $taskRun = 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$updater+'" -Check -Root "'+$Root+'"'
-  & schtasks.exe /Create /F /SC MINUTE /MO 15 /TN $taskName /TR $taskRun | Out-Null
-  if($LASTEXITCODE -ne 0) { throw 'windows_scheduler_registration_failed' }
-  $settings = (Get-ScheduledTask -TaskName $taskName).Settings
-  $settings.DisallowStartIfOnBatteries = $false
-  $settings.StopIfGoingOnBatteries = $false
-  Set-ScheduledTask -TaskName $taskName -Settings $settings | Out-Null
+  $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$updater+'" -Check -Root "'+$Root+'"'
+  $action = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument $arguments
+  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval ([TimeSpan]::FromMinutes(15))
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
   Write-Host 'Scheduled update check installed (every 15 minutes).'
 }
 function Install-UpdateProtocol {
