@@ -414,8 +414,7 @@ export class FileQueue {
           busy.id+', '+this.#execution(busy)+'). Reconcile before continuing; never launch a duplicate.');
       }
       if(book) {
-        const active=this.#state.book_tasks.find(t=>t.ingestion_id===book.ingestion_id&&
-          t.device_id===deviceId&&t.state==='active');
+        const active=this.#state.book_tasks.find(t=>t.ingestion_id===book.ingestion_id&&t.state==='active');
         if(active) throw Error('This ingestion already has an active book task: '+active.id);
       }
       const existingChat=this.#state.chats.find(c=>c.chat_url===target&&c.device_id===deviceId);
