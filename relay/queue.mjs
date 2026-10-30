@@ -79,10 +79,17 @@ export function callbackFooter(jobId) {
     'сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
-const BOOK_FOOTER = ' При импорте книги сообщай status=done после каждого законченного хода; '+
-  'book_completed=true ТОЛЬКО когда дочитана вся книга. Новый чат должен начать с book_ingest(status) '+
-  'для того же ingestion_id, не повторяя принятых страниц. Не публикуй каждый ход в Slack: ' +
-  'единственный итог по книге отправляет Launcher.';
+const BOOK_FOOTER = ' При импорте книги сообщай status=done после законченного хода. '+
+  'Не определяй завершение книги самостоятельно: единственный источник статуса — RKB. '+
+  'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
+  'Не публикуй каждый ход в Slack: итог отправляет Launcher.';
+const bookPrompt=(task,index)=>{
+  const selector=task.books[index];
+  return '(Книга '+(index+1)+' из '+task.books.length+': ingestion_id='+selector.ingestion_id+
+    (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
+    '. Сначала book_ingest(status) по этому ingestion_id; это не предыдущая книга. '+
+    'Принятые страницы не повторяй.)\n\n'+task.continuation_prompt;
+};
 
 // One plain instruction per state, so a calling agent always knows what to do next.
 function nextStep(job) {
@@ -333,8 +340,18 @@ export class FileQueue {
       const book=args.book;
       if(book!==undefined) {
         if(action!=='start')throw Error('book is only accepted by chatgpt_start');
-        requireString(book.ingestion_id,'book.ingestion_id',128);
         requireString(book.continuation_prompt,'book.continuation_prompt',MAX_PROMPT);
+        if(!Array.isArray(book.books)||book.books.length<1||book.books.length>32)
+          throw Error('book.books must contain 1-32 ordered ingestion selectors');
+        for(const selector of book.books) {
+          if(!selector||typeof selector!=='object'||Array.isArray(selector)||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selector.ingestion_id||''))
+            throw Error('Each book needs a canonical ingestion_id (RKB activity API has no telegram_original lookup)');
+          if(selector.telegram_original!==undefined)
+            requireString(selector.telegram_original,'book.books[].telegram_original',1000);
+        }
+        if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
+          throw Error('Duplicate ingestion_id in book list');
       }
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
@@ -363,8 +380,8 @@ export class FileQueue {
       const requestId=args.request_id===undefined?undefined:requireString(args.request_id,'request_id',128);
       const sameBook=j=>{
         const task=this.#state.book_tasks.find(t=>t.id===j.id);
-        return book?task?.ingestion_id===book.ingestion_id&&
-          task?.continuation_prompt===book.continuation_prompt:!task;
+        return book?task?.continuation_prompt===book.continuation_prompt&&
+          JSON.stringify(task?.books)===JSON.stringify(book.books):!task;
       };
       if(requestId) {
         const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
@@ -414,7 +431,9 @@ export class FileQueue {
           busy.id+', '+this.#execution(busy)+'). Reconcile before continuing; never launch a duplicate.');
       }
       if(book) {
-        const active=this.#state.book_tasks.find(t=>t.ingestion_id===book.ingestion_id&&t.state==='active');
+        const ids=new Set(book.books.map(x=>x.ingestion_id));
+        const active=this.#state.book_tasks.find(t=>t.state==='active'&&
+          t.books.slice(t.index).some(b=>ids.has(b.ingestion_id)));
         if(active) throw Error('This ingestion already has an active book task: '+active.id);
       }
       const existingChat=this.#state.chats.find(c=>c.chat_url===target&&c.device_id===deviceId);
@@ -458,16 +477,18 @@ export class FileQueue {
         id:jobId,action,prompt,effort,device_id:deviceId,
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
-        ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id}:{}),
+        ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id,
+          book_index:book?0:args.book_index,book_activity_at_creation:args.book_activity_at_creation||null}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
           handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
       };
       this.#state.jobs.push(job);
-      if(book) this.#state.book_tasks.push({id:jobId,ingestion_id:book.ingestion_id,device_id:deviceId,
+      if(internalBook&&args.book_replacement) job.handoff_reason||='book_silent';
+      if(book) this.#state.book_tasks.push({id:jobId,books:book.books,index:0,device_id:deviceId,
         continuation_prompt:book.continuation_prompt,slack_thread_url:args.slack_thread_url||null,
         job_id:jobId,state:'active',activity:null});
-      await this.#save();
+      if(!internalBook)await this.#save();
       return this.#public(job);
   }
   // Read-only verification of one uncertain delivery. It never resends the
@@ -556,9 +577,7 @@ export class FileQueue {
     const chat=this.#state.chats.find(c=>c.chat_url===actual&&c.device_id===job.device_id);
     const book=this.#state.book_tasks.find(t=>t.id===job.book_task_id);
     return {job_id:job.id,...publicJob,chat_url:actual,chat_id:chatIdFromUrl(actual),
-      ...(book?{book_task:{id:book.id,ingestion_id:book.ingestion_id,state:book.state,
-        current_job_id:book.job_id,last_operation_at:book.activity?.last_operation_at||null,
-        activity_state:book.activity?.state||null,terminal_summary:book.terminal_summary||null}}:{}),
+      ...(book?{book_task:this.#bookPublic(book)}:{}),
       continuation_count:continuationCount(chat?.continuation_count),
       execution:this.#execution(job),next_step:nextStep(job)};
   }
@@ -918,7 +937,6 @@ export class FileQueue {
       job.model_last_report_at=now;
       if(data.status==='started') job.model_started_at||=now;
       if(!ongoing) job.model_finished_at=now;
-      if(data.status==='done'&&data.book_completed===true&&job.book_task_id) job.book_completed=true;
       if(typeof data.summary==='string') {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
@@ -1081,7 +1099,7 @@ export class FileQueue {
       }
       // A continue that could not be delivered must not lose the line of work:
       // start the same prompt in a new chat right away (owner decision, 22 Oct).
-      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id) {
+      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id&&!job.book_task_id) {
         const fallback={id:randomUUID(),action:'start',effort:job.effort,device_id:job.device_id,chat_url:null,
           prompt:'(Продолжение работы из чата '+job.chat_url+': продолжить там не удалось, поэтому задача запущена в новом окне.)\n\n'+job.prompt,
           slack_thread_url:job.slack_thread_url||null,request_id:'fallback-'+job.id,status:'queued',
