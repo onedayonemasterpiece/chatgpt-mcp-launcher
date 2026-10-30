@@ -89,7 +89,7 @@ test('explicit whole-book done stops; generic per-turn done continues',async t=>
   await f.q.report('desktop',{job_id:second.id,status:'sent',chat_url:CHAT});
   await f.q.modelReport({job_id:second.id,status:'done',book_completed:true,summary:'Книга дочитана'});
   await f.q.tick();
-  assert.equal(f.q.bookTaskStatus(first.job_id).state,'done');
+  assert.equal(f.q.status(first.job_id).book_task.state,'done');
   assert.equal(await f.q.claim('desktop'),null);
   assert.equal(f.q.pendingBookNotices().length,1);
   await f.q.bookNoticeSent(first.job_id);
@@ -145,6 +145,6 @@ test('late whole-book report cancels a continuation queued from page completion'
   assert.equal(f.q.status(first.job_id).book_task.state,'active');
   await f.q.modelReport({job_id:first.job_id,status:'done',book_completed:true,summary:'All pages done'});
   await f.q.tick();
-  assert.equal(f.q.bookTaskStatus(first.job_id).state,'done');
+  assert.equal(f.q.status(first.job_id).book_task.state,'done');
   assert.equal(await f.q.claim('desktop'),null,'do not deliver already queued successor after book done');
 });
