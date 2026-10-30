@@ -82,7 +82,10 @@ export function callbackFooter(jobId) {
 const BOOK_FOOTER = ' При импорте книги сообщай status=done после законченного хода. '+
   'Не определяй завершение книги самостоятельно: единственный источник статуса — RKB. '+
   'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
-  'Не публикуй каждый ход в Slack: итог отправляет Launcher.';
+  'Не публикуй каждый ход в Slack: итог отправляет Launcher. '+
+  'Если OpenAI явно отклонил book_ingest(stage) клиентской проверкой безопасности, '+
+  'вызови chatgpt_report(status=blocked, failure_kind=client_safety_rejection, '+
+  'summary=точный текст отказа); не повторяй вызов через другой чат.';
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
   return '(Книга '+(index+1)+' из '+task.books.length+': ingestion_id='+selector.ingestion_id+
@@ -979,6 +982,9 @@ export class FileQueue {
       if(!MODEL_STATES.includes(data.status))throw Error('status must be started, progress, done, failed or blocked');
       const job=this.#state.jobs.find(j=>j.id===id&&(j.action==='start'||j.action==='continue'));
       if(!job)throw Error('Unknown job_id: use the job_id given in the prompt');
+      if(data.failure_kind!==undefined && (data.failure_kind!=='client_safety_rejection'||
+        data.status!=='blocked'||!job.book_task_id||typeof data.summary!=='string'||!data.summary.trim()))
+        throw Error('failure_kind requires blocked book report with exact refusal summary');
       const now=new Date(this.now()).toISOString();
       // A late "started" or "progress" never undoes a finished report.
       // done/failed are final; blocked is not: once the decision is given (in
@@ -993,6 +999,17 @@ export class FileQueue {
       if(typeof data.summary==='string') {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
+      }
+      if(data.failure_kind==='client_safety_rejection') {
+        const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
+          t.state==='active'&&t.index===job.book_index);
+        if(task) {
+          task.state='blocked';
+          task.terminal_summary='OpenAI client safety rejection: '+data.summary;
+          for(const pending of this.#state.jobs) if(pending.book_task_id===task.id&&pending.status==='queued')
+            Object.assign(pending,{status:'expired',reported_at:now,
+              message:'Cancelled after explicit client safety rejection'});
+        }
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
