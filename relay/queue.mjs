@@ -79,7 +79,10 @@ export function callbackFooter(jobId) {
     'сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
-const BOOK_FOOTER = ' При импорте книги сообщай status=done после законченного хода. '+
+const BOOK_FOOTER = ' Импортируй книгу одним длительным рабочим ходом, обычно 30–90 минут, пока есть работа и инструменты доступны. '+
+  'Страница и пакет сохранения — не отдельное задание и не повод закончить ответ. '+
+  'Не завершай ход после каждой страницы, пакета или обычного processing/wait; дождись результата и продолжай чтение. '+
+  'Не создавай себе короткий таймер остановки. Если ход действительно заканчивается, сообщи status=done только за этот ход. '+
   'Не определяй завершение книги самостоятельно: единственный источник статуса — RKB. '+
   'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
   'Не публикуй каждый ход в Slack: итог отправляет Launcher. '+
@@ -406,10 +409,7 @@ export class FileQueue {
           return {...this.#public(receipt.job),archived:true};
         }
       }
-      const bookProbe=action==='reconcile'&&internalBook&&!!args.book_task_id&&
-        args.book_task_id===reviewSource?.book_task_id&&
-        reviewSource?.status==='sent'&&!reviewSource?.page_completed_at;
-      if(action==='reconcile' && !bookProbe && reviewSource.status!=='needs_review' &&
+      if(action==='reconcile' && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
         throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
       this.#expire(this.now());
@@ -957,19 +957,6 @@ export class FileQueue {
           changed=true;
         } catch(err){task.last_enqueue_error=err.message;changed=true;}
         continue;
-      }
-      // Page completion is evidence only for the end of ONE ChatGPT turn.
-      if(job.status==='sent'&&url&&!job.page_completed_at&&job.model_status!=='done') {
-        const recent=[...this.#state.jobs].reverse().find(j=>j.action==='reconcile'&&j.reconcile_of===job.id);
-        if(now-Date.parse(job.reported_at||job.created_at)>=30_000&&
-          (!recent||now-Date.parse(recent.created_at)>=60_000)) {
-          try {
-            await this.#enqueue({action:'reconcile',job_id:job.id,device_id:task.device_id,
-              book_task_id:task.id,request_id:'book-probe-'+job.id+'-'+Math.floor(now/60_000),
-              [BOOK_INTERNAL]:true});
-            changed=true;
-          } catch {} // Existing pending read-only probe is sufficient.
-        }
       }
     }
     return changed;
