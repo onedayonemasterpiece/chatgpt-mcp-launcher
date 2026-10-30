@@ -631,5 +631,3 @@ test('processing/wait stays active after deadline; staged plus real 20m RKB sile
   assert.equal(f.q.status(first.job_id).book_task.rest_until,
     new Date(f.now()+35*60_000).toISOString(),'existing silent staged rule permits rest without waiting forever');
 });
-
-
