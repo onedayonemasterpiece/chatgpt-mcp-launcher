@@ -376,7 +376,8 @@ export class FileQueue {
           return {...this.#public(receipt.job),archived:true};
         }
       }
-      const bookProbe=action==='reconcile'&&args.book_task_id===reviewSource?.book_task_id&&
+      const bookProbe=action==='reconcile'&&!!args.book_task_id&&
+        args.book_task_id===reviewSource?.book_task_id&&
         reviewSource?.status==='sent'&&!reviewSource?.page_completed_at;
       if(action==='reconcile' && !bookProbe && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
