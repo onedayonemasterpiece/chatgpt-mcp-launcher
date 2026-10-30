@@ -208,6 +208,8 @@ test('one ingestion belongs to at most one live list, including its future books
   await assert.rejects(f.start([{telegram_original:'t.me/only'}],'locator-only'),
     /canonical ingestion_id/,'RKB endpoint cannot resolve locator-only');
   await assert.rejects(f.start([{ingestion_id:ING1},{ingestion_id:ING1}],'duplicate'),/Duplicate ingestion_id/);
+  await assert.rejects(f.q.enqueue({action:'start',prompt:'Import without report destination',
+    book:{books:[{ingestion_id:ING3}],continuation_prompt:CONTINUE}}),/requires slack_thread_url/);
   assert.equal(f.q.activeBooks().length,1);
   assert.equal(f.q.activeBooks()[0].book_task_id,first.job_id);
 });
@@ -277,7 +279,7 @@ test('existing relay timer invokes injected RKB test double only for active inge
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const first=await queue.enqueue({action:'start',prompt:'Import',request_id:'poll-double',
-    book:{books:[{ingestion_id:ING1}],continuation_prompt:CONTINUE}});
+    slack_thread_url:THREAD,book:{books:[{ingestion_id:ING1}],continuation_prompt:CONTINUE}});
   await new Promise(resolve=>setTimeout(resolve,120));
   assert.deepEqual(calls,[ING1],'only one activity poll in initial five-minute interval');
   assert.equal(queue.status(first.job_id).book_task.activity_state,'staged');
