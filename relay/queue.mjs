@@ -447,7 +447,7 @@ export class FileQueue {
           '. Follow its new chat_id instead of creating a second successor.');
       }
       const count=continuationCount(existingChat?.continuation_count);
-      const rollOver=action==='continue'&&(count===null||count>=MAX_CONTINUATIONS||
+      const rollOver=action==='continue'&&(count===null||(!internalBook&&count>=MAX_CONTINUATIONS)||
         (internalBook&&(args.book_stale||args.book_window_age)));
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
       const jobId=randomUUID();
@@ -932,10 +932,11 @@ export class FileQueue {
       if(['queued','claimed'].includes(job.status))continue;
       const lastOperation=Date.parse(activity?.last_operation_at||'');
       const checked=Date.parse(activity?.checked_at||'');
-      const silent=activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+      const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
+      const finished=runnable&&job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
+      const silent=!finished&&runnable&&
         Number.isFinite(lastOperation)&&now-lastOperation>=BOOK_SILENCE_MS&&
-        now-checked<=7*60_000&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
-      const finished=job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
+        now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
       const url=job.result_chat_url||job.chat_url;
       if(silent||finished) {
         if(!url&&!silent)continue;
@@ -943,7 +944,7 @@ export class FileQueue {
         const source=this.#state.jobs.find(j=>j.id===chat?.source_job_id);
         const aged=finished&&source&&now-Date.parse(source.created_at)>=BOOK_WINDOW_MS;
         const count=continuationCount(chat?.continuation_count);
-        const replacement=silent||!url||aged||count===null||count>=MAX_CONTINUATIONS;
+        const replacement=silent||!url||aged||count===null;
         if(replacement&&task.last_replacement_at&&
           now-Date.parse(task.last_replacement_at)<BOOK_SILENCE_MS)continue;
         try {
