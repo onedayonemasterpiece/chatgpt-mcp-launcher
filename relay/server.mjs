@@ -9,7 +9,7 @@ const VERSION = '2025-11-25';
 // 2025-11-25 handshake; a client picks one with server/discover.
 const MODERN = '2026-07-28';
 const META_VERSION = 'io.modelcontextprotocol/protocolVersion';
-const SERVER_INFO = {name:'chatgpt-local-chrome-launcher',version:'0.3.17'};
+const SERVER_INFO = {name:'chatgpt-local-chrome-launcher',version:'0.3.18'};
 const INSTRUCTIONS = [
   'Drives ChatGPT in the owner\'s own Chrome. Every action is a job: the call returns job_id at once, the browser does the work within seconds to a few minutes.',
   'Workflow:',
@@ -17,6 +17,7 @@ const INSTRUCTIONS = [
   '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id). For needs_review or unconfirmed execution, use chatgpt_reconcile(job_id): read-only proof of the exact job marker and (if observable) its finished assistant reply. Page completion is separate from model done; no proof keeps uncertainty.',
   '3. Follow-up: chatgpt_continue(chat_ref = chat_id, prompt). The launcher permits at most FIVE delivered continuations per real chat_id; at count 5, or whenever an old count is unknown/missing/null, this call automatically creates ONE new ChatGPT chat with context. Follow the NEW chat_id in chatgpt_task_status. A new start begins at count 0.',
   '4. Lost a chat_id: chatgpt_list_chats.',
+  'For autonomous RKB book reading, chatgpt_start(book: {ingestion_id, continuation_prompt}) starts ONE durable book task. A book turn done without book_completed=true causes the next continuation; fresh RKB activity controls 20-minute silence rollover, and an explicit finished-book report or RKB complete stops the task.',
   '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
   'Events: subscribe to chatgpt_launcher.job_update to be woken when a job finishes, is blocked/failed/needs review/expired, its tab is closed, or the agent goes silent. execution separates work from delivery: awaiting_confirmation, started, progress, page_completed (read-only observation, not model done), done, failed, unconfirmed (no confirmation).',
   'Coordination (optional reminder): chatgpt_coordination_set(goal, min_agents, idle_minutes) and subscribe to chatgpt_launcher.coordination_reminder; you are reminded while fewer agents than min_agents report started/progress for longer than idle_minutes. Pause only with a reason and a duration; close it explicitly when the whole work is done or cancelled.',
@@ -38,11 +39,22 @@ const PROPS = {
 const TOOL_LIST = [
   {
     name:'chatgpt_start', description:'Start a NEW ChatGPT conversation and send the prompt. Returns job_id at once; poll chatgpt_task_status until "sent", which gives chat_id for chatgpt_continue and chatgpt_read_reply. For a follow-up in an existing conversation use chatgpt_continue instead.',
-    inputSchema:{type:'object', properties:PROPS, required:['prompt'], additionalProperties:false},
+    inputSchema:{type:'object', properties:{...PROPS,book:{type:'object',description:'Optional durable RKB book task. Exactly one active task per ingestion_id per device.',
+      properties:{ingestion_id:{type:'string',description:'Existing RKB ingestion_id.'},
+        continuation_prompt:{type:'string',description:'Full follow-up text; a new chat must begin by calling book_ingest(status).'}},
+      required:['ingestion_id','continuation_prompt'],additionalProperties:false}},
+      required:['prompt'], additionalProperties:false},
   },
   {
     name:'chatgpt_continue', description:'Continue a line of work by chat_id. At most 5 confirmed continuations are delivered to one existing chat. If it already has 5, OR its legacy count is missing/null/unknown, the launcher automatically sends this prompt in a NEW chat (with source link and available original prompt). Poll chatgpt_task_status and switch to the returned NEW chat_id/url; previous_chat_url links the predecessor. Once successor_chat_url is known, continuing the old predecessor is rejected with that successor link, not forked. In-flight/uncertain work blocks handoff; duplicate request_id stays idempotent even after bounded job pruning. Never retry needs_review blindly. No old tab is closed.',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
+  },
+  {
+    name:'chatgpt_book_activity',description:'Supply the latest RKB book_ingest activity observation externally until the local read-only RKB activity endpoint is available. Missing/unavailable RKB is NOT reader silence. A fresh staged/continue_pages observation with last_operation_at older than 20 minutes authorizes one successor chat. Never use page text as the activity signal.',
+    inputSchema:{type:'object',properties:{book_task_id:{type:'string',description:'Original chatgpt_start job_id for the book task.'},
+      state:{type:'string',enum:['staged','continue_pages','complete','completed','blocked','unavailable']},
+      last_operation_at:{type:'string',description:'Last book_pages/book_ingest operation timestamp from RKB, ISO 8601.'}},
+      required:['book_task_id','state'],additionalProperties:false},
   },
   {
     name:'chatgpt_read_reply',description:'Unreliable fallback (ChatGPT page markup often cannot be read; prefer model_status/model_summary): get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
@@ -88,7 +100,7 @@ const TOOL_LIST = [
   },
   {
     name:'chatgpt_report',description:'For the ChatGPT conversation that received a launcher prompt ONLY: confirm with status "started" as soon as you begin; during long work you may send "progress" with a short note; at the end "done" with a short summary, "failed" with the reason, or "blocked" when you cannot go on without a decision by someone else (say exactly which decision and from whom). Use the job_id quoted in the prompt. Agents that launch tasks must not call this; they read the result via chatgpt_task_status.',
-    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','progress','done','failed','blocked']},summary:{type:'string',maxLength:20000,description:'Short progress note, result (done), reason (failed), or for blocked: exactly which decision is needed and from whom.'}},required:['job_id','status'],additionalProperties:false},
+    inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id quoted in the prompt.'},status:{type:'string',enum:['started','progress','done','failed','blocked']},summary:{type:'string',maxLength:20000,description:'Short progress note, result (done), reason (failed), or for blocked: exactly which decision is needed and from whom.'},book_completed:{type:'boolean',description:'Only for a book task with status=done: true means the ENTIRE book was read, not just this turn.'}},required:['job_id','status'],additionalProperties:false},
   },
   {
     name:'chatgpt_device_status', description:'Diagnostics: whether the owner\'s Chrome is online and accepting commands, and which launcher version it runs. Use when jobs stay queued.',
@@ -133,13 +145,77 @@ function targetOrigin(req) {
   // Reject browser-originated MCP mutations; Chrome device API uses bearer + host permissions.
   return !origin;
 }
-export async function makeRelay({file, mcpToken, devices, sender=webhookSender(), queueOptions={}, deliveryMs=1000, tickMs=60_000}) {
+
+function bookActivityReaderFromEnv() {
+  const address=process.env.LAUNCHER_RKB_ACTIVITY_URL;
+  const secret=process.env.LAUNCHER_RKB_ACTIVITY_TOKEN;
+  if(!address||!secret)return null;
+  const endpoint=new URL(address);
+  if(endpoint.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(endpoint.hostname)||
+    endpoint.pathname!=='/internal/import/activity')throw Error('RKB activity URL must be loopback /internal/import/activity');
+  return async ingestionId=>{
+    const url=new URL(endpoint);
+    url.searchParams.set('ingestion_id',ingestionId);
+    const response=await fetch(url,{headers:{Authorization:'Bearer '+secret},signal:AbortSignal.timeout(3_000)});
+    if(!response.ok)throw Error('RKB activity request failed: HTTP '+response.status);
+    return response.json();
+  };
+}
+function slackBookNotifierFromEnv() {
+  const secret=process.env.LAUNCHER_SLACK_BOT_TOKEN;
+  if(!secret)return null;
+  return async task=>{
+    const url=new URL(task.slack_thread_url);
+    const m=/^\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})$/.exec(url.pathname);
+    if(url.protocol!=='https:'||!url.hostname.endsWith('.slack.com')||!m)
+      throw Error('Invalid book Slack thread');
+    const message=task.state==='done'?'Книга дочитана':'Импорт остановлен: блокер';
+    const response=await fetch('https://slack.com/api/chat.postMessage',{
+      method:'POST',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},
+      body:JSON.stringify({channel:m[1],thread_ts:m[2]+'.'+m[3],
+        client_msg_id:task.book_task_id,
+        text:'[Launcher book-task / '+task.state.toUpperCase()+'] '+message+
+          '; ingestion_id='+task.ingestion_id+'; '+(task.terminal_summary||'')}),
+      signal:AbortSignal.timeout(10_000)
+    });
+    const result=await response.json();
+    if(!response.ok||!result.ok)throw Error('Slack notification failed: '+(result.error||response.status));
+  };
+}
+
+export async function makeRelay({file, mcpToken, devices, sender=webhookSender(), queueOptions={}, deliveryMs=1000, tickMs=60_000,
+  bookActivityReader=bookActivityReaderFromEnv(),bookNotifier=slackBookNotifierFromEnv()}) {
   if (typeof mcpToken !== 'string' || mcpToken.length < 24) throw new Error('MCP token must have >= 24 characters');
   if (!devices || Object.keys(devices).length===0 || Object.values(devices).some(t => typeof t !== 'string' || t.length < 24)) {
     throw new Error('Configure device token(s) (>= 24 characters)');
   }
   const queue = new FileQueue(file, devices, {seal:sealer(mcpToken),...queueOptions});
   await queue.initialize();
+  // Book tasks share the existing queue and relay timer; no external driver.
+  let bookTicking=false,bookPolledAt=0;
+  async function relayTick() {
+    if(bookTicking)return;
+    bookTicking=true;
+    try {
+      if(bookActivityReader&&Date.now()-bookPolledAt>=5*60_000) {
+        bookPolledAt=Date.now();
+        for(const book of queue.activeBooks()) {
+          try {
+            const result=await bookActivityReader(book.ingestion_id);
+            await queue.bookActivity({book_task_id:book.book_task_id,...result});
+          } catch(err) {
+            await queue.bookActivity({book_task_id:book.book_task_id,state:'unavailable'});
+            console.error('RKB activity',err?.message);
+          }
+        }
+      }
+      await queue.tick();
+      if(bookNotifier)for(const notice of queue.pendingBookNotices()) {
+        try {await bookNotifier(notice);await queue.bookNoticeSent(notice.book_task_id);}
+        catch(err) {console.error('book Slack notice',err?.message);}
+      }
+    } finally {bookTicking=false;}
+  }
   // Background work: deliver due events, and check silence/coordination.
   let delivering=false;
   const timers=[
@@ -149,7 +225,7 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
       try {while(await queue.deliverDue(sender));} catch(err) {console.error('event delivery',err?.message);}
       finally {delivering=false;}
     },deliveryMs),
-    setInterval(()=>queue.tick().catch(err=>console.error('tick',err?.message)),tickMs),
+    setInterval(()=>relayTick().catch(err=>console.error('tick',err?.message)),tickMs),
   ];
   for(const t of timers) t.unref?.();
   const server = http.createServer(async (req,res) => {
@@ -216,6 +292,8 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
               value=queue.listChats(args.device_id||'desktop',args.limit||20);
             } else if (name==='chatgpt_start'||name==='chatgpt_continue'||name==='chatgpt_open') {
               value=await queue.enqueue({...args,action:name==='chatgpt_start'?'start':name==='chatgpt_open'?'open':'continue'});
+            } else if (name==='chatgpt_book_activity') {
+              value=await queue.bookActivity(args);
             } else if (name==='chatgpt_reconcile') {
               if(!args.job_id) throw new Error('job_id is required');
               value=await queue.reconcile(args.job_id,args.request_id,args.device_id||'desktop');
