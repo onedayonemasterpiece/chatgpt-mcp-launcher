@@ -17,6 +17,7 @@ const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
 const BOOK_SILENCE_MS = 20 * 60_000;
 const BOOK_WINDOW_MS = 90 * 60_000;
+const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
@@ -89,6 +90,9 @@ const BOOK_FOOTER = ' Импортируй книгу одним длитель�
   'Если OpenAI явно отклонил book_ingest(stage) клиентской проверкой безопасности, '+
   'вызови chatgpt_report(status=blocked, failure_kind=client_safety_rejection, '+
   'summary=точный текст отказа); не повторяй вызов через другой чат.';
+const bookFooter=deadline=>BOOK_FOOTER+' Рабочий период до '+new Date(deadline).toISOString()+
+  ': у границы не начинай новый пакет, а текущий ответ и сохранение спокойно заверши, даже после срока; '+
+  'Launcher сам возобновит книгу после отдыха.';
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
   return '(Книга '+(index+1)+' из '+task.books.length+': ingestion_id='+selector.ingestion_id+
@@ -186,14 +190,15 @@ function requireString(value, name, maxLen = 256) {
 }
 
 export class FileQueue {
-  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null, request_receipts: [], book_tasks: [] };
+  #state = { jobs: [], device_status: {}, chats: [], subscriptions: [], outbox: [], coordination: null, request_receipts: [], book_tasks: [], book_cycles: {} };
   #serial = Promise.resolve();
   // silenceMs: no report from the agent for this long after started/progress
   // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
-  constructor(file, devices, {now=()=>Date.now(),silenceMs=30*60_000,confirmMs=10*60_000,seal=null}={}) {
+  constructor(file, devices, {now=()=>Date.now(),random=Math.random,silenceMs=30*60_000,confirmMs=10*60_000,seal=null}={}) {
     this.file = file;
     this.devices = devices;
     this.now = now;
+    this.random = random;
     this.silenceMs = silenceMs;
     this.confirmMs = confirmMs;
     this.seal = seal;
@@ -201,6 +206,50 @@ export class FileQueue {
     this.lastPersistedHeartbeat = new Map();
     this.seenThisProcess = new Set();
     this.verifiedThisProcess = new Set();
+  }
+  #restUntil(deviceId,now=this.now()) {
+    const until=this.#state.book_cycles[deviceId]?.resume_at;
+    return until>now?new Date(until).toISOString():null;
+  }
+  #bookPaused(deviceId,now=this.now()) {
+    const cycle=this.#state.book_cycles[deviceId];
+    return !!cycle && (cycle.resume_at>now ||
+      (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
+  }
+  #bookSilent(task,job,now) {
+    const activity=task.activity;
+    const last=Date.parse(activity?.last_operation_at||'');
+    return activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+      now-Date.parse(activity.checked_at||'')<=7*60_000&&Number.isFinite(last)&&
+      now-last>=BOOK_SILENCE_MS&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
+  }
+  #advanceBookRest(now) {
+    let changed=false;
+    for(const [deviceId,cycle] of Object.entries(this.#state.book_cycles)) {
+      if(cycle.resume_at) {
+        if(now>=cycle.resume_at) {delete this.#state.book_cycles[deviceId];changed=true;}
+      } else if(now-cycle.started_at>=BOOK_WORK_MS) {
+        for(const job of this.#state.jobs) if(job.device_id===deviceId&&job.book_task_id&&
+          ['start','continue'].includes(job.action)&&job.status==='queued') {
+          Object.assign(job,{status:'expired',reported_at:iso(now),
+            message:'Book rest'});
+          this.#notifyJob(job,'book_rest');
+          changed=true;
+        }
+        const working=this.#state.book_tasks.some(task=>{
+          if(task.state!=='active'||task.device_id!==deviceId)return false;
+          const job=this.#state.jobs.find(j=>j.id===task.job_id);
+          if(!job||!['claimed','sent','needs_review'].includes(job.status))return false;
+          if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
+          if(MODEL_FINAL.includes(job.model_status)||job.page_completed_at)return false;
+          return !this.#bookSilent(task,job,now);
+        });
+        if(working)continue; // stop new book claims, finish already-issued turns
+        cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
+        changed=true;
+      }
+    }
+    return changed;
   }
   observeDevice(deviceId, reportedRevision = 'unknown') {
     if (!Object.hasOwn(this.devices, deviceId)) throw new Error('Unknown device');
@@ -301,7 +350,8 @@ export class FileQueue {
         subscriptions:Array.isArray(parsed.subscriptions)?parsed.subscriptions:[],
         outbox:Array.isArray(parsed.outbox)?parsed.outbox:[],coordination:parsed.coordination||null,
         request_receipts:Array.isArray(parsed.request_receipts)?parsed.request_receipts:[],
-        book_tasks:Array.isArray(parsed.book_tasks)?parsed.book_tasks:[]};
+        book_tasks:Array.isArray(parsed.book_tasks)?parsed.book_tasks:[],
+        book_cycles:parsed.book_cycles||{}};
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
       // Earlier releases left such jobs as needs_review; they certainly sent nothing.
@@ -409,9 +459,14 @@ export class FileQueue {
           return {...this.#public(receipt.job),archived:true};
         }
       }
+      if((book||(internalBook&&args.book_task_id))&&['start','continue'].includes(action)&&
+        this.#bookPaused(deviceId))
+        throw Error('Book import rest until '+(this.#restUntil(deviceId)||
+          'current turns finish, followed by a full 35–90 minute pause'));
       if(action==='reconcile' && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
         throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
+      this.#advanceBookRest(this.now());
       this.#expire(this.now());
       // A repeated read-only verification never creates another Chrome action
       // while an earlier verification of the same uncertain job is pending.
@@ -455,7 +510,7 @@ export class FileQueue {
       // Reject before queue admission: this exact payload is what Chrome's
       // preparePrompt validates, including the callback footer added at claim.
       if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
-        ((book||(internalBook&&args.book_task_id))?BOOK_FOOTER.length:0)>MAX_PROMPT)
+        ((book||(internalBook&&args.book_task_id))?bookFooter(0).length:0)>MAX_PROMPT)
         throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
         // Never evict an ambiguous send: losing that receipt could authorize a
@@ -567,6 +622,8 @@ export class FileQueue {
     return next;
   }
   #markDelivered(job) {
+    if(job.book_task_id&&!this.#state.book_cycles[job.device_id])
+      this.#state.book_cycles[job.device_id]={started_at:this.now()};
     if(job.action!=='continue'||job.delivery_action==='start'||job.delivery_counted) return;
     const chat=this.#state.chats.find(c=>c.chat_url===job.chat_url&&c.device_id===job.device_id);
     if(chat) {
@@ -777,7 +834,8 @@ export class FileQueue {
   async tick() {
     return this.#run(async()=>{
       const now=this.now();
-      let changed=this.#expire(now);
+      let changed=this.#advanceBookRest(now);
+      if(this.#expire(now))changed=true;
       for(const job of this.#state.jobs) {
         if(this.#execution(job,now)!=='unconfirmed') continue;
         const key=job.model_last_report_at||job.model_started_at||job.reported_at;
@@ -880,7 +938,8 @@ export class FileQueue {
       activity_state:task.activity?.state||null,next_action:task.activity?.next_action||null,
       accepted_pages:task.activity?.accepted_pages??null,next_cursor:task.activity?.next_cursor||null,
       no_progress_new_chats:task.no_progress_new_chats||0,
-      terminal_summary:task.terminal_summary||null,last_enqueue_error:task.last_enqueue_error||null};
+      terminal_summary:task.terminal_summary||null,last_enqueue_error:task.last_enqueue_error||null,
+      rest_until:task.state==='active'?this.#restUntil(task.device_id):null};
   }
   pendingBookNotices() {
     return this.#state.book_tasks.flatMap(t=>{
@@ -923,6 +982,7 @@ export class FileQueue {
         if(task.index===task.books.length-1) {
           task.state='done';task.terminal_summary='All '+task.books.length+' books finalized in RKB';
         } else {
+          if(this.#bookPaused(task.device_id,now))continue;
           const nextIndex=task.index+1;
           try {
             const next=await this.#enqueue({action:'start',prompt:bookPrompt(task,nextIndex),
@@ -953,14 +1013,13 @@ export class FileQueue {
             task.no_progress_alert_id=randomUUID();
         }
       }
-      if(['queued','claimed'].includes(job.status))continue;
-      const lastOperation=Date.parse(activity?.last_operation_at||'');
+      if(this.#bookPaused(task.device_id,now)||['queued','claimed'].includes(job.status))continue;
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
       const finished=runnable&&job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
-      const silent=!finished&&runnable&&
-        Number.isFinite(lastOperation)&&now-lastOperation>=BOOK_SILENCE_MS&&
-        now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
+      // A never-delivered initial bookstart has no RKB activity for #bookSilent.
+      const silent=(!finished&&this.#bookSilent(task,job,now))||
+        (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       if(silent||finished) {
         if(!url&&!silent)continue;
@@ -1038,15 +1097,18 @@ export class FileQueue {
     });
   }
   status(jobId) {
-    if(this.#expire(this.now())) void this.#run(()=>this.#save());
+    const now=this.now();
+    const restChanged=this.#advanceBookRest(now);
+    if(this.#expire(now)||restChanged) void this.#run(()=>this.#save());
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
   }
   // Gives every job that has waited too long a final, unambiguous status.
   #expire(now=this.now()) {
     let changed=false;
     for(const job of this.#state.jobs) {
-      const since=Date.parse(job.status==='queued' ? job.created_at : job.claimed_at);
-      if(!['queued','claimed'].includes(job.status) || !(now-since>STALE_MS)) continue;
+      if(!['queued','claimed'].includes(job.status))continue;
+      const since=Date.parse(job.status==='queued'?job.created_at:job.claimed_at);
+      if(!(now-since>STALE_MS))continue;
       const at=new Date(now).toISOString();
       if(job.status==='queued') {
         Object.assign(job,{status:'expired',reported_at:at,
@@ -1067,7 +1129,10 @@ export class FileQueue {
   }
   async claim(deviceId) {
     return this.#run(async()=>{
-      if(this.#expire(this.now())) await this.#save(); // an expired prompt must never be handed out
+      const now=this.now();
+      let changed=this.#advanceBookRest(now);
+      if(this.#expire(now))changed=true;
+      if(changed)await this.#save(); // rest and expiration are durable before delivery
       const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
       if(!job)return null;
       job.status='claimed';
@@ -1078,7 +1143,8 @@ export class FileQueue {
       return {...job,action:job.delivery_action||job.action,
         ...(job.book_task_id?{slack_thread_url:null}:{}), // Book completion is posted once by relay, not by each ChatGPT turn.
         chat_url:job.delivery_action==='start'?null:job.chat_url,
-        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?BOOK_FOOTER:''):job.prompt,
+        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?
+          bookFooter((this.#state.book_cycles[deviceId]?.started_at||now)+BOOK_WORK_MS):''):job.prompt,
         mention:sends?APP_NAME:undefined,
         own_text:sends?effectivePrompt:undefined,
         ...(job.action==='reconcile'?{verify_job_id:job.reconcile_of}:{} )}; // Browser sees one new-chat send, never the old tab
