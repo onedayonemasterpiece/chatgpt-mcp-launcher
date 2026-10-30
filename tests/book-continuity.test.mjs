@@ -95,6 +95,28 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   assert.equal(recovered.status(first.job_id).book_task.current_job_id,replacement.id);
 });
 
+test('finished turn waits for RKB readiness and then continues same chat even after a cold interval',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  const oldOperation=new Date(f.now()).toISOString();
+  await f.activity(first,'processing',oldOperation);
+  await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Ordinary native wait'});
+  f.advance(35*60_000);
+  await f.activity(first,'processing',oldOperation);
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'backend wait must not create short reading turns');
+  await f.q.bookActivity({book_task_id:first.job_id,state:'unavailable'});
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'unavailable backend must not create short reading turns');
+  await f.activity(first,'staged',oldOperation);
+  await f.q.tick();
+  const next=await f.q.claim('desktop');
+  assert.equal(next.action,'continue','known completed turn is not a silent/dead window');
+  assert.equal(next.chat_url,CHAT);
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+});
+
 test('ordered books: only RKB finalized/done moves to next NEW chat, finally stops',async t=>{
   const f=await fixture(t);
   const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2,telegram_original:'t.me/c/1/2'}]);
@@ -187,6 +209,7 @@ test('a just-created replacement chat cannot be replaced again inside 20 minutes
   }
   assert.equal(await f.q.claim('desktop'),null,'rollover held by the 20-minute new-chat cooldown');
   f.advance(20*60_000);
+  await f.activity(first,'staged',oldOp);
   await f.q.tick();
   const later=await f.q.claim('desktop');
   assert.equal(later.action,'start');

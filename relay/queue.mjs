@@ -932,10 +932,11 @@ export class FileQueue {
       if(['queued','claimed'].includes(job.status))continue;
       const lastOperation=Date.parse(activity?.last_operation_at||'');
       const checked=Date.parse(activity?.checked_at||'');
-      const silent=activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+      const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
+      const finished=runnable&&job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
+      const silent=!finished&&runnable&&
         Number.isFinite(lastOperation)&&now-lastOperation>=BOOK_SILENCE_MS&&
-        now-checked<=7*60_000&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
-      const finished=job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
+        now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
       const url=job.result_chat_url||job.chat_url;
       if(silent||finished) {
         if(!url&&!silent)continue;
