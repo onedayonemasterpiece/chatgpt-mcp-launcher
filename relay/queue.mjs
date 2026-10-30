@@ -813,19 +813,28 @@ export class FileQueue {
     });
   }
 
-  // The RKB activity time is authoritative. No DOM text, model heartbeat or
-  // unavailable RKB response is treated as a book operation.
+  // One source of truth: the read-only RKB import-activity snapshot.
   async bookActivity(data) {
     return this.#run(async()=>{
       const task=this.#state.book_tasks.find(t=>t.id===data.book_task_id);
       if(!task)throw Error('Unknown book_task_id');
+      if(task.state!=='active')return this.#bookPublic(task);
+      const expected={processing:'wait',staged:'continue_pages',finalized:'done',failed:'blocker'};
       const state=requireString(data.state,'state',32);
-      if(!['staged','continue_pages','complete','completed','blocked','unavailable'].includes(state))
-        throw Error('Invalid book activity state');
+      if(state!=='unavailable'&&(!Object.hasOwn(expected,state)||data.next_action!==expected[state]))
+        throw Error('Invalid RKB import activity state/next_action pair');
       const stamp=data.last_operation_at==null?null:safeDate(data.last_operation_at);
-      if(data.last_operation_at!=null&&!stamp)throw Error('Invalid last_operation_at');
+      if(data.last_operation_at!=null&&!stamp)throw Error('Invalid RKB last_operation_at');
       const previous=task.activity?.last_operation_at||null;
-      task.activity={state,last_operation_at:stamp&&(!previous||stamp>previous)?stamp:previous,
+      if(stamp&&stamp!==previous&&(!previous||stamp>previous)) {
+        task.no_progress_new_chats=0;
+        task.no_progress_alert_id=null;
+        task.no_progress_notified_id=null;
+      }
+      task.activity={state,next_action:state==='unavailable'?null:data.next_action,
+        last_operation_at:stamp&&(!previous||stamp>previous)?stamp:previous,
+        accepted_pages:Number.isInteger(data.accepted_pages)?data.accepted_pages:(task.activity?.accepted_pages??null),
+        next_cursor:typeof data.next_cursor==='string'?data.next_cursor:null,
         checked_at:new Date(this.now()).toISOString()};
       await this.#save();
       return this.#bookPublic(task);
@@ -833,22 +842,37 @@ export class FileQueue {
   }
   activeBooks() {
     return this.#state.book_tasks.filter(t=>t.state==='active')
-      .map(t=>({book_task_id:t.id,ingestion_id:t.ingestion_id}));
+      .map(t=>({book_task_id:t.id,ingestion_id:t.books[t.index].ingestion_id}));
   }
   #bookPublic(task) {
-    return {book_task_id:task.id,ingestion_id:task.ingestion_id,state:task.state,
+    return {book_task_id:task.id,state:task.state,ingestion_id:task.books[task.index].ingestion_id,
+      current_book_index:task.index,total_books:task.books.length,
       current_job_id:task.job_id,last_operation_at:task.activity?.last_operation_at||null,
-      activity_state:task.activity?.state||null,terminal_summary:task.terminal_summary||null};
+      activity_state:task.activity?.state||null,next_action:task.activity?.next_action||null,
+      accepted_pages:task.activity?.accepted_pages??null,next_cursor:task.activity?.next_cursor||null,
+      no_progress_new_chats:task.no_progress_new_chats||0,
+      terminal_summary:task.terminal_summary||null,last_enqueue_error:task.last_enqueue_error||null};
   }
   pendingBookNotices() {
-    return this.#state.book_tasks.filter(t=>t.state!=='active'&&!t.notice_sent_at&&t.slack_thread_url)
-      .map(t=>({...this.#bookPublic(t),slack_thread_url:t.slack_thread_url}));
+    return this.#state.book_tasks.flatMap(t=>{
+      const shared={...this.#bookPublic(t),slack_thread_url:t.slack_thread_url};
+      if(!t.slack_thread_url)return [];
+      if(t.state!=='active'&&!t.notice_sent_at)
+        return [{...shared,kind:'terminal',notice_id:t.id}];
+      if(t.state==='active'&&t.no_progress_alert_id&&t.no_progress_notified_id!==t.no_progress_alert_id)
+        return [{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
+      return [];
+    });
   }
-  async bookNoticeSent(id) {
+  async bookNoticeSent(id,noticeId) {
     return this.#run(async()=>{
-      const task=this.#state.book_tasks.find(t=>t.id===id&&t.state!=='active');
-      if(!task)throw Error('Unknown terminal book task');
-      task.notice_sent_at||=new Date(this.now()).toISOString();
+      const task=this.#state.book_tasks.find(t=>t.id===id);
+      if(!task)throw Error('Unknown book task');
+      if(task.state!=='active'&&noticeId===task.id)
+        task.notice_sent_at||=new Date(this.now()).toISOString();
+      else if(task.state==='active'&&noticeId===task.no_progress_alert_id)
+        task.no_progress_notified_id=noticeId;
+      else throw Error('Obsolete book notice');
       await this.#save();
     });
   }
@@ -856,31 +880,54 @@ export class FileQueue {
     let changed=false;
     for(const task of this.#state.book_tasks) {
       if(task.state!=='active')continue;
-      // Recover a transition committed before its task pointer was updated.
       const jobs=this.#state.jobs.filter(j=>j.book_task_id===task.id&&
         ['start','continue'].includes(j.action));
-      const latest=jobs.at(-1);
-      if(latest&&task.job_id!==latest.id) {task.job_id=latest.id;changed=true;}
-      const job=latest;
+      const job=jobs.at(-1);
       if(!job)continue;
-      if(job.fallback_job_id) {
-        task.job_id=job.fallback_job_id; changed=true; continue;
-      }
-      const fullBook=jobs.find(j=>j.model_status==='done'&&j.book_completed);
-      if(task.activity?.state==='complete'||task.activity?.state==='completed'||fullBook) {
-        task.state='done';task.terminal_summary=fullBook?.model_summary||'Книга дочитана';
-      } else if(task.activity?.state==='blocked') {
-        task.state='blocked';task.terminal_summary='RKB status: blocked';
-      }
-      if(task.state!=='active') {
-        if(job.status==='queued') {job.status='expired';job.message='Cancelled: book task reached terminal state';}
+      if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
+      const activity=task.activity;
+      // A completed/failed book is determined ONLY by RKB, never by ChatGPT.
+      if(activity?.state==='finalized'&&activity.next_action==='done') {
+        if(job.status==='queued') {
+          job.status='expired';job.message='Previous book already finalized in RKB';
+        }
+        if(task.index===task.books.length-1) {
+          task.state='done';task.terminal_summary='All '+task.books.length+' books finalized in RKB';
+        } else {
+          const nextIndex=task.index+1;
+          try {
+            const next=await this.#enqueue({action:'start',prompt:bookPrompt(task,nextIndex),
+              device_id:task.device_id,request_id:'book-next-book-'+task.id+'-'+nextIndex,
+              book_task_id:task.id,book_index:nextIndex,[BOOK_INTERNAL]:true});
+            task.job_id=next.job_id;task.index=nextIndex;task.activity=null;
+            task.last_replacement_at=null;task.no_progress_new_chats=0;
+            task.no_progress_alert_id=null;task.no_progress_notified_id=null;
+            task.last_enqueue_error=null;
+          } catch(err){task.last_enqueue_error=err.message;}
+        }
         changed=true;continue;
       }
+      if(activity?.state==='failed'&&activity.next_action==='blocker') {
+        if(job.status==='queued'){job.status='expired';job.message='RKB reported blocker';}
+        task.state='blocked';task.terminal_summary='RKB failed/blocker: '+task.books[task.index].ingestion_id;
+        changed=true;continue;
+      }
+      // Count only confirmed replacement chats; any newer RKB reader operation
+      // resets the streak in bookActivity(). No successful start -> no alarm.
+      if(job.status==='sent'&&job.result_chat_url&&job.handoff_reason&&!job.book_handoff_counted&&
+        job.book_index===task.index) {
+        job.book_handoff_counted=true;changed=true;
+        if(activity?.state==='staged'&&activity.next_action==='continue_pages'&&
+          activity.last_operation_at===job.book_activity_at_creation) {
+          task.no_progress_new_chats=(task.no_progress_new_chats||0)+1;
+          if(task.no_progress_new_chats>=2&&!task.no_progress_alert_id)
+            task.no_progress_alert_id=randomUUID();
+        }
+      }
       if(['queued','claimed'].includes(job.status))continue;
-      const activity=task.activity;
       const lastOperation=Date.parse(activity?.last_operation_at||'');
       const checked=Date.parse(activity?.checked_at||'');
-      const silent=['staged','continue_pages'].includes(activity?.state)&&
+      const silent=activity?.state==='staged'&&activity.next_action==='continue_pages'&&
         Number.isFinite(lastOperation)&&now-lastOperation>=BOOK_SILENCE_MS&&
         now-checked<=7*60_000&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
       const finished=job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
@@ -890,20 +937,23 @@ export class FileQueue {
         const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===task.device_id);
         const source=this.#state.jobs.find(j=>j.id===chat?.source_job_id);
         const aged=finished&&source&&now-Date.parse(source.created_at)>=BOOK_WINDOW_MS;
+        const count=continuationCount(chat?.continuation_count);
+        const replacement=silent||!url||aged||count===null||count>=MAX_CONTINUATIONS;
+        if(replacement&&task.last_replacement_at&&
+          now-Date.parse(task.last_replacement_at)<BOOK_SILENCE_MS)continue;
         try {
           const next=await this.#enqueue({action:url?'continue':'start',
-            ...(url?{chat_url:url}:{}),prompt:task.continuation_prompt,device_id:task.device_id,
-            request_id:'book-next-'+job.id,slack_thread_url:task.slack_thread_url||undefined,
-            book_task_id:task.id,book_stale:silent,book_window_age:!!aged,[BOOK_INTERNAL]:true});
-          task.job_id=next.job_id;changed=true;
-        } catch(err) {
-          task.state='blocked';task.terminal_summary='Launcher cannot schedule next book turn: '+err.message;
+            ...(url?{chat_url:url}:{}),prompt:bookPrompt(task,task.index),device_id:task.device_id,
+            request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
+            book_activity_at_creation:activity?.last_operation_at||null,book_replacement:replacement,
+            book_stale:silent,book_window_age:!!aged,[BOOK_INTERNAL]:true});
+          task.job_id=next.job_id;task.last_enqueue_error=null;
+          if(replacement)task.last_replacement_at=new Date(now).toISOString();
           changed=true;
-        }
+        } catch(err){task.last_enqueue_error=err.message;changed=true;}
         continue;
       }
-      // PR 45's read-only page_completed evidence: inspect the exact turn once
-      // per minute, never infer completion from elapsed time or an empty editor.
+      // Page completion is evidence only for the end of ONE ChatGPT turn.
       if(job.status==='sent'&&url&&!job.page_completed_at&&job.model_status!=='done') {
         const recent=[...this.#state.jobs].reverse().find(j=>j.action==='reconcile'&&j.reconcile_of===job.id);
         if(now-Date.parse(job.reported_at||job.created_at)>=30_000&&
@@ -912,7 +962,8 @@ export class FileQueue {
             await this.#enqueue({action:'reconcile',job_id:job.id,device_id:task.device_id,
               book_task_id:task.id,request_id:'book-probe-'+job.id+'-'+Math.floor(now/60_000),
               [BOOK_INTERNAL]:true});
-          } catch {} // An existing pending read-only probe is sufficient.
+            changed=true;
+          } catch {} // Existing pending read-only probe is sufficient.
         }
       }
     }
