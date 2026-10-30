@@ -5,11 +5,11 @@ import {MAX_CHATS,canonicalChatUrl,chatIdFromUrl,referenceToUrl,recordedChat} fr
 import {DeliveryError,EVENT_DEFINITIONS,JOB_EVENT,REMINDER_EVENT,eventId,subscriptionId,validSecret} from './events.mjs';
 
 const EFFORTS = ['auto', 'medium', 'high', 'xhigh'];
-const REPORT_STATES = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review'];
+const REPORT_STATES = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review','stopped'];
 const MAX_REPLY = 20_000;
 // No job may stay "in progress" forever: after this long it gets a final status.
 const STALE_MS = 15 * 60_000;
-const TERMINAL = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review','expired'];
+const TERMINAL = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review','expired','stopped'];
 // Owner's ChatGPT plugin (MCP app) settings page; refresh_tools clicks its "Refresh tools" button.
 const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_[a-z0-9_]+$/i;
 const MAX_JOBS = 500;
@@ -216,6 +216,9 @@ export class FileQueue {
     return !!cycle && (cycle.resume_at>now ||
       (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
   }
+  #bookTurnStopped(job) {
+    return this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id&&j.status==='stopped');
+  }
   #bookSilent(task,job,now) {
     const activity=task.activity;
     const last=Date.parse(activity?.last_operation_at||'');
@@ -239,10 +242,10 @@ export class FileQueue {
         const working=this.#state.book_tasks.some(task=>{
           if(task.state!=='active'||task.device_id!==deviceId)return false;
           const job=this.#state.jobs.find(j=>j.id===task.job_id);
-          if(!job||!['claimed','sent','needs_review'].includes(job.status))return false;
+          if(!job)return true; // missing current turn cannot prove termination
+          if(!['claimed','sent','needs_review'].includes(job.status))return false;
           if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
-          if(MODEL_FINAL.includes(job.model_status)||job.page_completed_at)return false;
-          return !this.#bookSilent(task,job,now);
+          return !(MODEL_FINAL.includes(job.model_status)||job.page_completed_at||this.#bookTurnStopped(job));
         });
         if(working)continue; // stop new book claims, finish already-issued turns
         cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
@@ -388,8 +391,9 @@ export class FileQueue {
   async #enqueue(args) {
       const action=args.action;
       const internalBook=args[BOOK_INTERNAL]===true;
-      if(!['start','continue','open','read','close','reconcile','refresh_tools'].includes(action))throw Error('Invalid action');
-      const noPrompt=['open','read','close','reconcile','refresh_tools'].includes(action);
+      if(!['start','continue','open','read','close','reconcile','refresh_tools'].includes(action)&&
+        !(action==='book_stop'&&internalBook))throw Error('Invalid action');
+      const noPrompt=['open','read','close','reconcile','refresh_tools','book_stop'].includes(action);
       if(action==='refresh_tools' && !PLUGIN_URL.test(args.plugin_url||''))
         throw Error('plugin_url must be https://chatgpt.com/settings/plugins-settings/plugin_<id>');
       let prompt=noPrompt?null:requireString(args.prompt,'prompt',MAX_PROMPT);
@@ -423,6 +427,9 @@ export class FileQueue {
       const hasRef=typeof args.chat_ref==='string'&&args.chat_ref.trim().length>0;
       if(!['start','reconcile','refresh_tools'].includes(action) && (hasUrl===hasRef))throw Error('Exactly one chat_url or chat_ref is required');
       let target=null;
+      if(action==='book_stop'&&!this.#state.jobs.some(j=>j.id===args.after_job_id&&
+        j.book_task_id===args.book_task_id&&j.device_id===deviceId&&['start','continue'].includes(j.action)))
+        throw Error('Book Stop requires an exact owned reader job');
       if(action==='reconcile') {
         target=canonicalChatUrl(reviewSource.result_chat_url||reviewSource.chat_url);
         if(!target) throw Error('No verified conversation URL for read-only reconciliation; keep needs_review');
@@ -540,6 +547,7 @@ export class FileQueue {
         ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id,
           book_index:book?0:args.book_index,book_activity_at_creation:args.book_activity_at_creation||null}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
+        ...(action==='book_stop'?{after_job_id:args.after_job_id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
           handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
       };
@@ -1013,14 +1021,28 @@ export class FileQueue {
             task.no_progress_alert_id=randomUUID();
         }
       }
-      if(this.#bookPaused(task.device_id,now)||['queued','claimed'].includes(job.status))continue;
+      if(['queued','claimed'].includes(job.status))continue;
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
-      const finished=runnable&&job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
-      // A never-delivered initial bookstart has no RKB activity for #bookSilent.
-      const silent=(!finished&&this.#bookSilent(task,job,now))||
+      const complete=MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookTurnStopped(job);
+      const finished=runnable&&job.status==='sent'&&complete;
+      // Silence permits an exact Stop attempt, never rest or a concurrent successor.
+      const stale=this.#bookSilent(task,job,now);
+      const silent=(stale&&!MODEL_FINAL.includes(job.model_status)&&!job.page_completed_at)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
+      if(stale&&!complete&&job.status==='sent'&&url) {
+        if(!this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id)) {
+          try {
+            await this.#enqueue({action:'book_stop',chat_url:url,device_id:task.device_id,
+              after_job_id:job.id,book_task_id:task.id,book_index:task.index,
+              request_id:'book-stop-'+job.id,[BOOK_INTERNAL]:true});
+            changed=true;
+          } catch(err){task.last_enqueue_error=err.message;changed=true;}
+        }
+        continue;
+      }
+      if(this.#bookPaused(task.device_id,now))continue;
       if(silent||finished) {
         if(!url&&!silent)continue;
         const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===task.device_id);
@@ -1133,7 +1155,20 @@ export class FileQueue {
       let changed=this.#advanceBookRest(now);
       if(this.#expire(now))changed=true;
       if(changed)await this.#save(); // rest and expiration are durable before delivery
-      const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
+      let job=null;
+      for(const candidate of this.#state.jobs) {
+        if(candidate.device_id!==deviceId||candidate.status!=='queued')continue;
+        if(candidate.action==='book_stop') {
+          const task=this.#state.book_tasks.find(t=>t.id===candidate.book_task_id);
+          const source=this.#state.jobs.find(j=>j.id===candidate.after_job_id);
+          if(!task||task.state!=='active'||!source||!this.#bookSilent(task,source,now)||
+            MODEL_FINAL.includes(source.model_status)||source.page_completed_at) {
+            candidate.status='expired';candidate.message='Book Stop no longer applicable';changed=true;continue;
+          }
+        }
+        job=candidate;break;
+      }
+      if(changed)await this.#save();
       if(!job)return null;
       job.status='claimed';
       job.claimed_at=new Date(this.now()).toISOString();
@@ -1157,9 +1192,14 @@ export class FileQueue {
       const job=this.#state.jobs.find(j=>j.id===id&&j.device_id===deviceId);
       if(!job)throw Error('Unknown job');
       if(data.status==='opened' && job.action!=='open')throw Error('Only open jobs can report opened');
-      if(data.status==='read' && !['read','reconcile'].includes(job.action))throw Error('Only read jobs (or reconciliation) can report read');
+      if(data.status==='read' && !['read','reconcile','book_stop'].includes(job.action))throw Error('Only read jobs (or reconciliation) can report read');
       if(data.status==='closed' && job.action!=='close')throw Error('Only close jobs can report closed');
       if(data.status==='refreshed' && job.action!=='refresh_tools')throw Error('Only refresh_tools jobs can report refreshed');
+      if(data.status==='stopped'&&job.action!=='book_stop')throw Error('Only book_stop jobs can report stopped');
+      if(job.action==='book_stop'&&['stopped','read'].includes(data.status)&&
+          (canonicalChatUrl(data.chat_url)!==job.chat_url||
+            data.status==='read'&&data.execution_evidence!=='page_completed'))
+        throw Error('Book Stop requires matching conversation and completion proof');
       if(['open','read','close','refresh_tools'].includes(job.action)&&data.status==='sent')throw Error('Open and read jobs can never report sent');
       // A late real report replaces the status given on timeout: it is more accurate.
       if(job.status!=='claimed' && !job.timed_out) {
@@ -1211,6 +1251,13 @@ export class FileQueue {
         job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
       job.reported_at=new Date(this.now()).toISOString();
+      if(job.action==='book_stop'&&job.status==='read'&&data.execution_evidence==='page_completed') {
+        const source=this.#state.jobs.find(j=>j.id===job.after_job_id);
+        if(source&&!MODEL_FINAL.includes(source.model_status)&&!source.page_completed_at) {
+          source.page_completed_at=job.reported_at;
+          this.#notifyJob(source,'page_completed');
+        }
+      }
       if(job.action==='reconcile') {
         const source=this.#state.jobs.find(j=>j.id===job.reconcile_of&&j.device_id===deviceId);
         // A cryptographically unguessable per-job marker, found outside the

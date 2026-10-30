@@ -201,15 +201,18 @@ async function runDriver(script,tab,payload) {
       func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
         payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
         payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
+        payload.action==='book_stop' ? globalThis.chatGPTLauncherStopBook(payload) :
         globalThis.chatGPTLauncherRun(payload),args:[payload]});
     return result;
   };
-  if(!['read','reconcile','probe'].includes(payload.action)) return invoke();
+  if(!['read','reconcile','probe','book_stop'].includes(payload.action)) return invoke();
   // Composer (90s) + history (60s) + settling (1s), with Chrome API headroom.
   let timer;
   try {
     return await Promise.race([invoke(),new Promise((_,reject)=>{
-      timer=setTimeout(()=>reject(new Error('Read-only browser inspection timed out; no prompt submitted')),180000);
+      timer=setTimeout(()=>reject(new Error(payload.action==='book_stop' ?
+        'Book Stop observation timed out; outcome unconfirmed' :
+        'Read-only browser inspection timed out; no prompt submitted')),180000);
     })]);
   } finally {clearTimeout(timer);}
 }
@@ -277,10 +280,20 @@ async function refreshPluginTools(job) {
 }
 async function execute(job) {
   if(job.action==='refresh_tools') return refreshPluginTools(job);
-  if(!['start','continue','open','read','close','reconcile'].includes(job.action))throw Error('Unsupported browser action');
-  const prompt=['open','read','close','reconcile'].includes(job.action)?null:preparePrompt(job);
+  if(!['start','continue','open','read','close','reconcile','book_stop'].includes(job.action))throw Error('Unsupported browser action');
+  const prompt=['open','read','close','reconcile','book_stop'].includes(job.action)?null:preparePrompt(job);
   if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
   if(job.action==='close') return closeChat(job,driverScript());
+  if(job.action==='book_stop') {
+    const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/*'}))
+      .filter(t=>Number.isInteger(t.id)&&sameConversationUrl(t.url,job.chat_url));
+    if(tabs.length!==1)return {status:'blocked',chat_url:job.chat_url,message:'Exact active book tab not found'};
+    const observed=(await runDriver(driverScript(),tabs[0],job))?.result;
+    if(!observed||!['stopped','read','blocked','needs_review'].includes(observed.status))
+      return {status:'needs_review',chat_url:job.chat_url,message:'Book Stop result not confirmed'};
+    return {status:observed.status,chat_url:observed.chat_url||null,message:observed.message||'',
+      execution_evidence:observed.execution_evidence==='page_completed'?'page_completed':'unknown'};
+  }
   const tab=await openChatTab(job);
   await awaitTab(tab.id);
   if(job.action==='open')return {status:'opened',chat_url:job.chat_url,
