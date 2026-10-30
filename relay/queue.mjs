@@ -229,6 +229,13 @@ export class FileQueue {
       if(cycle.resume_at) {
         if(now>=cycle.resume_at) {delete this.#state.book_cycles[deviceId];changed=true;}
       } else if(now-cycle.started_at>=BOOK_WORK_MS) {
+        for(const job of this.#state.jobs) if(job.device_id===deviceId&&job.book_task_id&&
+          ['start','continue'].includes(job.action)&&job.status==='queued') {
+          Object.assign(job,{status:'expired',reported_at:iso(now),
+            message:'Book rest'});
+          this.#notifyJob(job,'book_rest');
+          changed=true;
+        }
         const working=this.#state.book_tasks.some(task=>{
           if(task.state!=='active'||task.device_id!==deviceId)return false;
           const job=this.#state.jobs.find(j=>j.id===task.job_id);
@@ -239,9 +246,6 @@ export class FileQueue {
         });
         if(working)continue; // stop new book claims, finish already-issued turns
         cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
-        for(const job of this.#state.jobs) if(job.device_id===deviceId&&job.book_task_id&&
-          ['start','continue'].includes(job.action)&&job.status==='queued')
-          job.ready_at=iso(cycle.resume_at); // fresh 15-minute claim grace after rest
         changed=true;
       }
     }
@@ -455,9 +459,14 @@ export class FileQueue {
           return {...this.#public(receipt.job),archived:true};
         }
       }
+      if((book||(internalBook&&args.book_task_id))&&['start','continue'].includes(action)&&
+        this.#bookPaused(deviceId))
+        throw Error('Book import rest until '+(this.#restUntil(deviceId)||
+          'current turns finish, followed by a full 35–90 minute pause'));
       if(action==='reconcile' && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
         throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
+      this.#advanceBookRest(this.now());
       this.#expire(this.now());
       // A repeated read-only verification never creates another Chrome action
       // while an earlier verification of the same uncertain job is pending.
@@ -530,7 +539,6 @@ export class FileQueue {
         request_id:requestId||null,status:'queued',created_at:now,
         ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id,
           book_index:book?0:args.book_index,book_activity_at_creation:args.book_activity_at_creation||null}:{}),
-        ...((book||internalBook)&&this.#restUntil(deviceId)?{ready_at:this.#restUntil(deviceId)}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
           handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
@@ -633,12 +641,7 @@ export class FileQueue {
     return {job_id:job.id,...publicJob,chat_url:actual,chat_id:chatIdFromUrl(actual),
       ...(book?{book_task:this.#bookPublic(book)}:{}),
       continuation_count:continuationCount(chat?.continuation_count),
-      execution:this.#execution(job),next_step:job.book_task_id&&['start','continue'].includes(job.action)&&job.status==='queued'?
-        (this.#restUntil(job.device_id)?'Book import resting until '+this.#restUntil(job.device_id)+
-          '; automatically resumes the same ingestion.':this.#bookPaused(job.device_id)?
-          'Finishing existing book turns before the full rest period; no new book prompts are delivered.':
-          'Book prompt waiting for Chrome delivery (normal 15-minute expiry).'):
-        nextStep(job)};
+      execution:this.#execution(job),next_step:nextStep(job)};
   }
   // What is known about the work itself, separate from delivery of the prompt.
   // Page-observed completion is distinct from ChatGPT's own model report.
@@ -979,6 +982,7 @@ export class FileQueue {
         if(task.index===task.books.length-1) {
           task.state='done';task.terminal_summary='All '+task.books.length+' books finalized in RKB';
         } else {
+          if(this.#bookPaused(task.device_id,now))continue;
           const nextIndex=task.index+1;
           try {
             const next=await this.#enqueue({action:'start',prompt:bookPrompt(task,nextIndex),
@@ -1013,7 +1017,9 @@ export class FileQueue {
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
       const finished=runnable&&job.status==='sent'&&(job.model_status==='done'||!!job.page_completed_at);
-      const silent=!finished&&this.#bookSilent(task,job,now);
+      // A never-delivered initial bookstart has no RKB activity for #bookSilent.
+      const silent=(!finished&&this.#bookSilent(task,job,now))||
+        (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       if(silent||finished) {
         if(!url&&!silent)continue;
@@ -1091,7 +1097,9 @@ export class FileQueue {
     });
   }
   status(jobId) {
-    if(this.#expire(this.now())) void this.#run(()=>this.#save());
+    const now=this.now();
+    const restChanged=this.#advanceBookRest(now);
+    if(this.#expire(now)||restChanged) void this.#run(()=>this.#save());
     return this.#public(this.#state.jobs.find(j=>j.id===jobId));
   }
   // Gives every job that has waited too long a final, unambiguous status.
@@ -1099,10 +1107,8 @@ export class FileQueue {
     let changed=false;
     for(const job of this.#state.jobs) {
       if(!['queued','claimed'].includes(job.status))continue;
-      if(job.status==='queued'&&job.book_task_id&&['start','continue'].includes(job.action)&&
-        this.#bookPaused(job.device_id,now))continue;
-      const eligibleAt=job.status==='queued'?(job.ready_at||job.created_at):job.claimed_at;
-      if(!(now-Date.parse(eligibleAt)>STALE_MS))continue;
+      const since=Date.parse(job.status==='queued'?job.created_at:job.claimed_at);
+      if(!(now-since>STALE_MS))continue;
       const at=new Date(now).toISOString();
       if(job.status==='queued') {
         Object.assign(job,{status:'expired',reported_at:at,
@@ -1127,8 +1133,7 @@ export class FileQueue {
       let changed=this.#advanceBookRest(now);
       if(this.#expire(now))changed=true;
       if(changed)await this.#save(); // rest and expiration are durable before delivery
-      const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued'&&
-        !(j.book_task_id&&['start','continue'].includes(j.action)&&this.#bookPaused(deviceId,now)));
+      const job=this.#state.jobs.find(j=>j.device_id===deviceId&&j.status==='queued');
       if(!job)return null;
       job.status='claimed';
       job.claimed_at=new Date(this.now()).toISOString();
