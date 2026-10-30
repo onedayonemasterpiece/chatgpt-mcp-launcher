@@ -378,6 +378,7 @@ export class FileQueue {
       }
       if(args.slack_thread_url!==undefined && !/^https:\/\/[a-z0-9-]+\.slack\.com\/archives\/[A-Z0-9]+\/p[0-9]+(?:\?.*)?$/i.test(args.slack_thread_url))
         throw Error('Invalid Slack thread URL');
+      if(book&&!args.slack_thread_url)throw Error('Book task requires slack_thread_url for completion and no-progress notices');
       const requestId=args.request_id===undefined?undefined:requireString(args.request_id,'request_id',128);
       const sameBook=j=>{
         const task=this.#state.book_tasks.find(t=>t.id===j.id);
