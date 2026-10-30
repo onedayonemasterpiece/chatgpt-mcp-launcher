@@ -187,7 +187,7 @@ test('two confirmed replacements without a new RKB operation emit ONE warning, s
     'new RKB operation resets the no-progress streak');
 });
 
-test('a just-created replacement chat cannot be replaced again inside 20 minutes',async t=>{
+test('book continuations stay in the same chat past five turns until its 90-minute lifetime',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
@@ -199,17 +199,20 @@ test('a just-created replacement chat cannot be replaced again inside 20 minutes
   await f.q.report('desktop',{job_id:replacement.id,status:'sent',chat_url:NEXT});
   await f.q.modelReport({job_id:replacement.id,status:'done'});
   await f.q.tick();
-  // Five normal continuations are allowed before the sixth would open a new chat.
-  for(let n=0;n<5;n++) {
+  // The ordinary task limit must not fragment a book into new chats.
+  for(let n=0;n<7;n++) {
     const next=await f.q.claim('desktop');
     assert.equal(next.action,'continue');
     await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:NEXT});
     await f.q.modelReport({job_id:next.id,status:'done'});
     await f.q.tick();
   }
-  assert.equal(await f.q.claim('desktop'),null,'rollover held by the 20-minute new-chat cooldown');
-  f.advance(20*60_000);
+  const eighth=await f.q.claim('desktop');
+  assert.equal(eighth.action,'continue');
+  await f.q.report('desktop',{job_id:eighth.id,status:'sent',chat_url:NEXT});
+  f.advance(90*60_000);
   await f.activity(first,'staged',oldOp);
+  await f.q.modelReport({job_id:eighth.id,status:'done'});
   await f.q.tick();
   const later=await f.q.claim('desktop');
   assert.equal(later.action,'start');
