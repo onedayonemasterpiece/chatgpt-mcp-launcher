@@ -247,14 +247,17 @@ async function pressRefreshTools() {
   if(!button) return {status:'blocked',message:'Refresh tools button not found on the plugin page; nothing was pressed'};
   button.click();
   await sleep(10000);
-  for(let i=0;i<40;i++){
+  let ready=false;
+  for(let i=0;i<40&&!ready;i++){
     const b=find();
-    if(b&&!b.disabled&&b.getAttribute('aria-busy')!=='true') break;
-    await sleep(500);
+    ready=!!b&&!b.disabled&&b.getAttribute('aria-busy')!=='true';
+    if(!ready) await sleep(500);
   }
   const notes=[...document.querySelectorAll('[role="alert"],[role="status"]')]
     .map(n=>(n.textContent||'').trim()).filter(Boolean).join(' | ').slice(0,300);
-  return {status:'refreshed',message:'Refresh tools pressed and finished'+(notes?': '+notes:'')};
+  // A button still busy after 30 s is not proof of success: say so, keep the tab.
+  return ready ? {status:'refreshed',message:'Refresh tools pressed and finished'+(notes?': '+notes:'')} :
+    {status:'needs_review',message:'Refresh tools pressed, but the button did not become ready within 30 s; check the plugin page'+(notes?': '+notes:'')};
 }
 async function refreshPluginTools(job) {
   if(!validPluginUrl(job.chat_url))throw Error('Invalid ChatGPT plugin settings URL');
