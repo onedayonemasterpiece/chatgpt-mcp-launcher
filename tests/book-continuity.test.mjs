@@ -129,3 +129,22 @@ test('90-minute window rolls over on completed turn; unavailable RKB never means
   assert.equal(next.handoff_reason,'book_window_age');
   assert.equal(next.previous_chat_url,CHAT);
 });
+
+
+test('late whole-book report cancels a continuation queued from page completion',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  f.advance(31_000);
+  await f.q.tick();
+  const probe=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:probe.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+  await f.q.modelReport({job_id:first.job_id,status:'done',book_completed:true,summary:'All pages done'});
+  await f.q.tick();
+  assert.equal(f.q.bookTaskStatus(first.job_id).state,'done');
+  assert.equal(await f.q.claim('desktop'),null,'do not deliver already queued successor after book done');
+});
