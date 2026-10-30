@@ -816,10 +816,6 @@ export class FileQueue {
     return this.#state.book_tasks.filter(t=>t.state==='active')
       .map(t=>({book_task_id:t.id,ingestion_id:t.ingestion_id}));
   }
-  bookTaskStatus(id) {
-    const task=this.#state.book_tasks.find(t=>t.id===id);
-    return task?this.#bookPublic(task):null;
-  }
   #bookPublic(task) {
     return {book_task_id:task.id,ingestion_id:task.ingestion_id,state:task.state,
       current_job_id:task.job_id,last_operation_at:task.activity?.last_operation_at||null,
