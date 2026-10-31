@@ -321,6 +321,8 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
               value=await queue.enqueue({...args,action:'close'});
             } else if (name==='chatgpt_report') {
               value=await queue.modelReport(args);
+              if(queue.status(args.job_id)?.book_task&&['done','failed','blocked'].includes(value.model_status))
+                bookPolledAt=0;
             } else if (name==='chatgpt_read_reply') {
               value=await queue.enqueue({...args,action:'read'});
             } else if (name==='chatgpt_coordination_set') {

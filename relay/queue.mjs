@@ -1034,7 +1034,8 @@ export class FileQueue {
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
       const complete=this.#bookTurnReleased(job);
-      const finished=runnable&&job.status==='sent'&&complete;
+      const finished=runnable&&job.status==='sent'&&complete&&
+        checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at);
       // Silence permits an exact Stop attempt, never rest or a concurrent successor.
       const stale=this.#bookSilent(task,job,now);
       const silent=(stale&&!MODEL_FINAL.includes(job.model_status)&&!job.page_completed_at)||
