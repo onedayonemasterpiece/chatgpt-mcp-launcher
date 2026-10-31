@@ -439,7 +439,7 @@ export class FileQueue {
         throw Error('Book Stop requires an exact owned reader job');
       if(action==='reconcile') {
         target=canonicalChatUrl(reviewSource.result_chat_url||reviewSource.chat_url);
-        if(!target) throw Error('No verified conversation URL for read-only reconciliation; keep needs_review');
+        if(!target && reviewSource.action!=='start') throw Error('No verified conversation URL for read-only reconciliation; keep needs_review');
       } else if(action==='refresh_tools') {
         target=args.plugin_url;
       } else if(action!=='start') {
@@ -458,7 +458,8 @@ export class FileQueue {
       if(requestId) {
         const existing=this.#state.jobs.find(j=>j.request_id===requestId&&j.device_id===deviceId);
         if(existing) {
-          if(existing.action!==action||existing.prompt!==prompt||existing.chat_url!==target||
+          if(existing.action!==action||existing.prompt!==prompt||
+            (existing.chat_url!==target && !(action==='reconcile'&&!existing.chat_url&&existing.reconcile_of===reviewSource.id))||
             (action==='reconcile'&&existing.reconcile_of!==reviewSource.id)||!sameBook(existing))
             throw Error('Idempotency key belongs to a different operation');
           return this.#public(existing);
@@ -467,7 +468,9 @@ export class FileQueue {
         // compact receipt survives so a lost response never creates a new send.
         const receipt=this.#state.request_receipts.find(r=>r.device_id===deviceId&&r.request_id===requestId);
         if(receipt) {
-          if(receipt.action!==action||receipt.chat_url!==target||receipt.prompt_digest!==promptDigest(prompt)||
+          if(receipt.action!==action||
+            (receipt.chat_url!==target && !(action==='reconcile'&&!receipt.chat_url&&receipt.job?.reconcile_of===reviewSource.id))||
+            receipt.prompt_digest!==promptDigest(prompt)||
             (action==='reconcile'&&receipt.job?.reconcile_of!==reviewSource.id)||!sameBook(receipt.job))
             throw Error('Idempotency key belongs to a different operation');
           return {...this.#public(receipt.job),archived:true};
@@ -1295,7 +1298,8 @@ export class FileQueue {
         // of non-delivery. There is no operator override and no fabricated DONE.
         const proof=data.delivery_evidence==='sent' &&
           ['user_message_marker','conversation_marker'].includes(data.evidence_kind) &&
-          job.status==='read' && url===job.chat_url &&
+          job.status==='read' && !!url && (url===job.chat_url ||
+            (!job.chat_url && source?.action==='start')) &&
           ['needs_review','sent'].includes(source?.status) &&
           (source.delivery_action!=='start'||url!==source.previous_chat_url);
         const recovered=proof&&source.status==='needs_review';
