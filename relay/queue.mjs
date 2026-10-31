@@ -574,7 +574,8 @@ export class FileQueue {
   // Re-sends the exact stored prompt of a job that certainly sent nothing, into
   // the same chat. The caller never sees the prompt, so it cannot retype it;
   // the same text also lets Chrome recognise and replace its own unsent draft.
-  async retry(jobId,requestId) {
+  async retry(jobId,requestId) { return this.#run(()=>this.#retry(jobId,requestId)); }
+  async #retry(jobId,requestId) {
     const original=this.#state.jobs.find(j=>j.id===jobId);
     if(!original) throw Error('Unknown job_id');
     if(original.action!=='start'&&original.action!=='continue') throw Error('Only start and continue jobs can be retried');
@@ -585,11 +586,26 @@ export class FileQueue {
     }
     if(original.model_status) throw Error('ChatGPT already confirmed this prompt; nothing to retry');
     if(original.fallback_job_id) throw Error('Already restarted in a new chat as job '+original.fallback_job_id+'; follow that job');
-    const job=await this.enqueue({action:original.action,prompt:original.prompt,effort:original.effort,
+    const key=requestId||('retry-'+original.id);
+    const cached=this.#state.jobs.some(j=>j.device_id===original.device_id&&j.request_id===key)||
+      this.#state.request_receipts.some(r=>r.device_id===original.device_id&&r.request_id===key);
+    const book=this.#state.book_tasks.find(t=>t.id===original.book_task_id);
+    if(original.book_task_id&&!cached&&(!book||book.state!=='active'||
+        book.index!==original.book_index||book.job_id!==original.id))
+      throw Error('Retry requires the current book turn; follow the existing book task');
+    const job=await this.#enqueue({action:original.action,prompt:original.prompt,effort:original.effort,
       device_id:original.device_id,slack_thread_url:original.slack_thread_url||undefined,
       ...(original.chat_url?{chat_url:original.chat_url}:{}),
-      request_id:requestId||('retry-'+original.id)});
-    return {...job,retry_of:original.id};
+      ...(original.book_task_id?{book_task_id:original.book_task_id,book_index:original.book_index,
+        book_activity_at_creation:original.book_activity_at_creation,
+        book_replacement:!!original.handoff_reason,book_stale:original.handoff_reason==='book_silent',
+        book_window_age:original.handoff_reason==='book_window_age',[BOOK_INTERNAL]:true}:{}),
+      request_id:key});
+    if(book&&!cached) {
+      book.job_id=job.job_id;book.last_enqueue_error=null;
+      await this.#save();
+    }
+    return {...job,...(book?{book_task:this.#bookPublic(book)}:{}),retry_of:original.id};
   }
   resolveChat(reference,deviceId='desktop') {
     const jobs=this.#state.jobs.filter(j=>j.device_id===deviceId);

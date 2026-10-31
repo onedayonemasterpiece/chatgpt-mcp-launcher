@@ -398,6 +398,43 @@ test('two confirmed replacements without a new RKB operation emit ONE warning, s
     'new RKB operation resets the no-progress streak');
 });
 
+test('retry of an unsent silent-book handoff keeps book ownership and automatic continuation',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const oldOp=new Date(f.now()).toISOString();
+  f.advance(21*60_000);
+  await f.activity(first,'staged',oldOp);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:stop.id,status:'blocked',chat_url:CHAT,
+    message:'Exact latest book turn or composer not confirmed'});
+  await f.q.tick();
+  const handoff=await f.q.claim('desktop');
+  assert.equal(handoff.action,'start');
+  assert.equal(handoff.handoff_reason,'book_silent');
+  await f.q.report('desktop',{job_id:handoff.id,status:'blocked',
+    message:'ChatGPT composer unavailable after 90 seconds'});
+  const retry=await f.q.retry(handoff.id,'book-handoff-retry');
+  assert.equal(retry.book_task_id,first.job_id);
+  assert.equal(retry.book_task.current_job_id,retry.job_id);
+  assert.equal((await f.q.retry(handoff.id,'book-handoff-retry')).job_id,retry.job_id);
+  const delivered=await f.q.claim('desktop');
+  assert.equal(delivered.id,retry.job_id);
+  assert.equal(delivered.action,'start');
+  assert.match(delivered.own_text,new RegExp(ING1));
+  await f.q.report('desktop',{job_id:delivered.id,status:'sent',chat_url:NEXT});
+  await f.q.modelReport({job_id:delivered.id,status:'done',summary:'Real reader turn complete'});
+  await f.activity(first);
+  await f.q.tick();
+  const next=await f.q.claim('desktop');
+  assert.equal(next.action,'continue');
+  assert.equal(next.chat_url,NEXT);
+  assert.equal(next.book_task_id,first.job_id);
+  await assert.rejects(f.q.retry(handoff.id,'different-obsolete-retry'),/current book turn/);
+});
+
 test('book continuations stay in the same chat past five turns until its 90-minute lifetime',async t=>{
   const f=await fixture(t);
   const first=await f.start();
