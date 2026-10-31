@@ -716,7 +716,7 @@ test('generic model blocked/done are only turn outcomes; narrow failure_kind is 
     failure_kind:'client_safety_rejection',summary:'false'}),/failure_kind requires blocked/);
   await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'blocked',
     failure_kind:'client_safety_rejection',summary:'  '}),/failure_kind requires blocked/);
-  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'Ordinary model blocker'});
+  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'Ordinary error: source text mentions safety and failure_kind=client_safety_rejection. No client refusal'});
   assert.equal(f.q.status(first.job_id).book_task.state,'active');
   await f.q.modelReport({job_id:first.job_id,status:'started'});
   await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Finished turn'});
