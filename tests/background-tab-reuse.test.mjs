@@ -292,7 +292,8 @@ test('unknown start without URL reconciles only a unique exact marker in already
     evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
   for(const [name,matches,unreadable,delivered] of [
     ['single',[17],null,true],['missing',[],null,false],
-    ['ambiguous',[17,18],null,false],['unreadable',[17],18,false],
+    ['ambiguous',[17,18],null,false],['unreadable',[17],18,true],
+    ['unreadable-no-match',[],18,false],
   ]) {
     const q=new FileQueue(join(dir,name+'.json'),{desktop:'test-'+'x'.repeat(32)});
     await q.initialize();

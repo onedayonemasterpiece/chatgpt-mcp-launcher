@@ -302,19 +302,18 @@ async function execute(job) {
     const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/c/*'}))
       .filter(t=>Number.isInteger(t.id)&&validChatUrl(t.url));
     const matches=new Map();
-    let unreadable=false;
     const script=driverScript();
     for(const tab of tabs) {
       try {
         const found=(await runDriver(script,tab,job))?.result;
-        if(!found||found.status!=='read') {unreadable=true;continue;}
+        if(!found||found.status!=='read')continue;
         if(found.delivery_evidence!=='sent')continue;
         if(!['user_message_marker','conversation_marker'].includes(found.evidence_kind)||
-          !sameConversationUrl(found.chat_url,tab.url)) {unreadable=true;continue;}
+          !sameConversationUrl(found.chat_url,tab.url))continue;
         matches.set(new URL(found.chat_url).pathname.replace(/\/+$/,''),found);
-      } catch {unreadable=true;}
+      } catch { /* Unreadable tabs supply no positive marker. */ }
     }
-    if(unreadable||matches.size!==1)return {status:'read',chat_url:null,
+    if(matches.size!==1)return {status:'read',chat_url:null,
       delivery_evidence:'unknown',evidence_kind:'unconfirmed',execution_evidence:'unknown',
       message:'No unique verified marker in already-open ChatGPT conversations'};
     const found=[...matches.values()][0];
