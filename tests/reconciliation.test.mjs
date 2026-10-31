@@ -206,7 +206,7 @@ test('read exposes categorical page state even when conversation messages are un
   }
 });
 function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
-                  unknownComposer=false,ambiguousComposer=false,
+                  unknownComposer=false,ambiguousComposer=false,noComposer=false,measureWaits=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden='',
                   stop=false,stopNoEffect=false,newerUser=false}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
@@ -256,7 +256,7 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
   const document={
     querySelectorAll(selector){
       if(selector==='[contenteditable="true"],textarea')
-        return ambiguousComposer?[editor,another]:[editor];
+        return noComposer?[]:ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
       if(selector==='[data-message-author-role="user"]')
         return [...(user||userEditable||userHidden?[userNode]:[]),...(newerUser?[extraUser]:[])];
@@ -267,15 +267,35 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
       return [];
     }
   };
+  let waitCalls=0;
   const context={document,window:{location:{href:wrongPage?'https://chatgpt.com/':URL},
     getComputedStyle:el=>({visibility:'visible',display:el?.hiddenInFixture?'none':'block'})},
-    globalThis:null,URL:globalThis.URL,setTimeout:fn=>{queueMicrotask(fn);return 1;}};
+    globalThis:null,URL:globalThis.URL,setTimeout:fn=>{waitCalls++;queueMicrotask(fn);return 1;}};
   context.globalThis=context;
   runInNewContext(driver,context,{timeout:2000});
   if(stop)return context.chatGPTLauncherStopBook({action:'book_stop',after_job_id:ID})
     .then(result=>({...result,stop_clicks:stopClicks}));
-  return context.chatGPTLauncherReconcile({action:'reconcile',verify_job_id:ID});
+  return context.chatGPTLauncherReconcile({action:'reconcile',verify_job_id:ID})
+    .then(result=>measureWaits?{...result,waitCalls}:result);
 }
+test('read-only reconcile finds visible user marker immediately without a composer',async()=>{
+  const marker='job_id='+ID;
+  const found=await inspect({noComposer:true,measureWaits:true,user:'Delivered '+marker});
+  assert.equal(found.status,'read');
+  assert.equal(found.chat_url,URL);
+  assert.equal(found.delivery_evidence,'sent');
+  assert.equal(found.evidence_kind,'user_message_marker');
+  assert.equal(found.waitCalls,0,'reconcile must not wait 90 seconds for an absent composer');
+  for(const sample of [
+    {},{user:'No exact marker'},{userHidden:marker},{userEditable:marker},
+    {mainEditable:marker},{main:'Visible main '+marker}
+  ]) {
+    const result=await inspect({...sample,noComposer:true,measureWaits:true});
+    assert.equal(result.delivery_evidence,'unknown',JSON.stringify(sample));
+    assert.equal(result.evidence_kind,'unconfirmed');
+    assert.equal(result.waitCalls,0,'negative proof must also return without waiting');
+  }
+});
 test('book-only Stop clicks only the exact latest running turn; unknown outcome never passes',async()=>{
   const marker='job_id='+ID;
   const stopped=await inspect({stop:true,user:'Import '+marker,assistant:'Partial page',generating:true});
