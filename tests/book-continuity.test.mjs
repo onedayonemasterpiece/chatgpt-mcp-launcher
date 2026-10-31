@@ -532,6 +532,44 @@ test('existing relay timer invokes injected RKB test double only for active inge
   assert.equal(queue.status(first.job_id).book_task.activity_state,'staged');
 });
 
+test('a completed book report refreshes stale activity before another continuation',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'launcher-terminal-activity-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  let now=Date.now(),finalized=false,calls=0;
+  const mcpToken='mcp-'.repeat(9);
+  const {queue,server}=await makeRelay({file:join(dir,'state.json'),mcpToken,
+    devices:{desktop:DEVICE},queueOptions:{now:()=>now},tickMs:15,deliveryMs:100_000,
+    bookNotifier:null,bookActivityReader:async()=>{
+      calls++;
+      return {state:finalized?'finalized':'staged',next_action:finalized?'done':'continue_pages',
+        last_operation_at:new Date(now).toISOString(),accepted_pages:475,next_cursor:finalized?null:'478'};
+    }});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const first=await queue.enqueue({action:'start',prompt:'Import',request_id:'terminal-activity',
+    slack_thread_url:THREAD,book:{books:[{ingestion_id:ING1}],continuation_prompt:CONTINUE}});
+  const claimed=await queue.claim('desktop');
+  await queue.report('desktop',{job_id:claimed.id,status:'sent',chat_url:CHAT});
+  for(let i=0;i<100&&!calls;i++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls,1);
+  now+=1000;finalized=true;
+  // The timer may already be using its cached snapshot when the report arrives.
+  await queue.modelReport({job_id:first.job_id,status:'done'});
+  await queue.tick();
+  assert.equal(queue.status(first.job_id).book_task.current_job_id,first.job_id,
+    'a snapshot preceding the terminal report cannot authorize continuation');
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/mcp`,{
+    method:'POST',headers:{Authorization:'Bearer '+mcpToken,'Content-Type':'application/json'},
+    body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',
+      params:{name:'chatgpt_report',arguments:{job_id:first.job_id,status:'done'}}})});
+  assert.equal(response.status,200);await response.json();
+  for(let i=0;i<100&&queue.status(first.job_id).book_task.state!=='done';i++)
+    await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls,2,'existing timer refreshes without waiting five minutes');
+  assert.equal(queue.status(first.job_id).book_task.state,'done');
+  assert.equal((await queue.claim('desktop')).action,'close','completed reader tab is retired');
+});
+
 
 test('explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
   const f=await fixture(t);
