@@ -412,8 +412,7 @@
       return {status:'failed',message:'Invalid reconciliation target'};
     if(!isConversationUrl(window.location.href))
       return {status:'read',delivery_evidence:'unknown',evidence_kind:'wrong_page',execution_evidence:'unknown',message:'No verified conversation URL'};
-    const ready=await waitForComposer();
-    await sleep(500);
+    const ready=composer();
     const marker='job_id='+job.verify_job_id;
     const url=chatUrl();
     // Only text rendered in the LIVE page can prove delivery. A detached
