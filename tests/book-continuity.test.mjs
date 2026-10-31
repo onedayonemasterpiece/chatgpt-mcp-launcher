@@ -608,6 +608,53 @@ test('a completed book report refreshes stale activity before another continuati
 });
 
 
+test('cached-schema safety refusal stops a sent successor, including after restart with a stored blocked report',async t=>{
+  for(const persisted of [false,true]) {
+    const f=await fixture(t);
+    const first=await f.start();
+    await f.deliver(first);
+    await f.activity(first);
+    await f.q.modelReport({job_id:first.job_id,status:'done'});
+    await f.q.tick();
+    const successorId=f.q.status(first.job_id).book_task.current_job_id;
+    const sent=await f.deliver({job_id:successorId});
+    await f.q.modelReport({job_id:sent.id,status:'started'});
+    const refusal='failure_kind=client_safety_rejection. Script error: OpenAI client blocked book_ingest(status).';
+    let q=f.q;
+    if(persisted) {
+      // A pre-fix relay stored the cached-schema report but left its book active.
+      const state=JSON.parse(await readFile(f.file,'utf8'));
+      const source=state.jobs.find(j=>j.id===first.job_id);
+      source.model_status='blocked';source.model_summary=refusal;
+      await writeFile(f.file,JSON.stringify(state));
+      q=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+      await q.initialize();
+      await q.tick();
+    } else {
+      await q.modelReport({job_id:first.job_id,status:'blocked',summary:refusal});
+    }
+    assert.equal(q.status(first.job_id).book_task.state,'blocked',persisted?'stored report':'cached schema');
+    assert.match(q.status(first.job_id).book_task.terminal_summary,/OpenAI client safety rejection/);
+    const stop=await q.claim('desktop');
+    assert.equal(stop?.action,'book_stop','sent successor needs the existing exact Stop');
+    assert.equal(stop.after_job_id,sent.id);
+    assert.equal(stop.chat_url,CHAT);
+    await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+    const prior=JSON.parse(await readFile(f.file,'utf8')).jobs
+      .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action)).length;
+    f.advance(25*60_000);
+    await q.tick();
+    const reloaded=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+    await reloaded.initialize();
+    await reloaded.tick();
+    const later=JSON.parse(await readFile(f.file,'utf8')).jobs
+      .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action));
+    assert.equal(later.length,prior,'no future book sends after reload');
+    assert.equal(await reloaded.claim('desktop'),null);
+    assert.equal(reloaded.pendingBookNotices().length,1,'one book-specific terminal notice');
+  }
+});
+
 test('explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
   const f=await fixture(t);
   const first=await f.start();
@@ -669,7 +716,7 @@ test('generic model blocked/done are only turn outcomes; narrow failure_kind is 
     failure_kind:'client_safety_rejection',summary:'false'}),/failure_kind requires blocked/);
   await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'blocked',
     failure_kind:'client_safety_rejection',summary:'  '}),/failure_kind requires blocked/);
-  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'Ordinary model blocker'});
+  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'Ordinary error: source text mentions safety and failure_kind=client_safety_rejection. No client refusal'});
   assert.equal(f.q.status(first.job_id).book_task.state,'active');
   await f.q.modelReport({job_id:first.job_id,status:'started'});
   await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Finished turn'});

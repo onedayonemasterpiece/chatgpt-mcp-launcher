@@ -19,6 +19,8 @@ const BOOK_SILENCE_MS = 20 * 60_000;
 const BOOK_WINDOW_MS = 90 * 60_000;
 const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
+const clientSafetyMarker=s=>typeof s==='string'&&
+  /^failure_kind=client_safety_rejection\.\s+\S/.test(s);
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
@@ -87,9 +89,10 @@ const BOOK_FOOTER = ' Импортируй книгу одним длитель�
   'Не определяй завершение книги самостоятельно: единственный источник статуса — RKB. '+
   'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
   'Не публикуй каждый ход в Slack: итог отправляет Launcher. '+
-  'Если OpenAI явно отклонил book_ingest(stage) клиентской проверкой безопасности, '+
+  'Если OpenAI явно отклонил book_ingest(status или stage) клиентской проверкой безопасности, '+
   'вызови chatgpt_report(status=blocked, failure_kind=client_safety_rejection, '+
-  'summary=точный текст отказа); не повторяй вызов через другой чат.';
+  'summary=точный текст отказа); если в схеме нет failure_kind, начни summary с '+
+  '"failure_kind=client_safety_rejection. " перед точным отказом; не повторяй вызов через другой чат.';
 const bookFooter=deadline=>BOOK_FOOTER+' Рабочий период до '+new Date(deadline).toISOString()+
   ': у границы не начинай новый пакет, а текущий ответ и сохранение спокойно заверши, даже после срока; '+
   'Launcher сам возобновит книгу после отдыха.';
@@ -1000,6 +1003,25 @@ export class FileQueue {
       await this.#save();
     });
   }
+  async #stopBookOnSafety(task,source,summary,now) {
+    task.state='blocked';
+    task.terminal_summary='OpenAI client safety rejection: '+summary;
+    const following=this.#state.jobs.slice(this.#state.jobs.indexOf(source)+1)
+      .filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
+        ['start','continue'].includes(j.action));
+    for(const j of following) if(j.status==='queued')
+      Object.assign(j,{status:'expired',reported_at:iso(now),
+        message:'Cancelled after explicit client safety rejection'});
+    const sent=following.findLast(j=>j.status==='sent'&&(j.result_chat_url||j.chat_url));
+    if(sent) {
+      task.job_id=sent.id;
+      try {
+        await this.#enqueue({action:'book_stop',chat_url:sent.result_chat_url||sent.chat_url,
+          device_id:task.device_id,after_job_id:sent.id,book_task_id:task.id,
+          book_index:task.index,request_id:'book-stop-'+sent.id,[BOOK_INTERNAL]:true});
+      } catch(err){task.last_enqueue_error=err.message;}
+    }
+  }
   async #driveBooks(now) {
     let changed=false;
     for(const task of this.#state.book_tasks) {
@@ -1009,6 +1031,12 @@ export class FileQueue {
       const job=jobs.at(-1);
       if(!job)continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
+      const refusal=jobs.find(j=>j.book_index===task.index&&j.model_status==='blocked'&&
+        clientSafetyMarker(j.model_summary));
+      if(refusal) {
+        await this.#stopBookOnSafety(task,refusal,refusal.model_summary,now);
+        changed=true;continue;
+      }
       const activity=task.activity;
       // A completed/failed book is determined ONLY by RKB, never by ChatGPT.
       if(activity?.state==='finalized'&&activity.next_action==='done') {
@@ -1125,16 +1153,11 @@ export class FileQueue {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
       }
-      if(data.failure_kind==='client_safety_rejection') {
+      if(data.failure_kind==='client_safety_rejection'||
+        (data.status==='blocked'&&clientSafetyMarker(data.summary))) {
         const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
           t.state==='active'&&t.index===job.book_index);
-        if(task) {
-          task.state='blocked';
-          task.terminal_summary='OpenAI client safety rejection: '+data.summary;
-          for(const pending of this.#state.jobs) if(pending.book_task_id===task.id&&pending.status==='queued')
-            Object.assign(pending,{status:'expired',reported_at:now,
-              message:'Cancelled after explicit client safety rejection'});
-        }
+        if(task) await this.#stopBookOnSafety(task,job,data.summary,this.now());
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
@@ -1193,8 +1216,11 @@ export class FileQueue {
         if(candidate.action==='book_stop') {
           const task=this.#state.book_tasks.find(t=>t.id===candidate.book_task_id);
           const source=this.#state.jobs.find(j=>j.id===candidate.after_job_id);
-          if(!task||task.state!=='active'||!source||!this.#bookSilent(task,source,now)||
-            MODEL_FINAL.includes(source.model_status)||source.page_completed_at) {
+          const safety=task?.state==='blocked'&&
+            task.terminal_summary?.startsWith('OpenAI client safety rejection: ')&&
+            source?.id===task.job_id&&source.status==='sent';
+          if(!source||!(safety||(task?.state==='active'&&this.#bookSilent(task,source,now)&&
+            !MODEL_FINAL.includes(source.model_status)&&!source.page_completed_at))) {
             candidate.status='expired';candidate.message='Book Stop no longer applicable';changed=true;continue;
           }
         }
