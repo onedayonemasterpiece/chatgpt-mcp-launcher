@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdtemp,rm} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {FileQueue} from '../relay/queue.mjs';
 
 const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
 const CHAT='https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -46,8 +49,12 @@ function fixture(openTabs=[],opts={}) {
         calls.frameRemoved=true;
         throw Error('Frame 0 was removed');
       }
-      if(params.args[0].action==='reconcile') return [{result:opts.recoveryEvidence||
-        {status:'read',chat_url:CHAT,delivery_evidence:'unknown',evidence_kind:'unconfirmed'}}];
+      if(params.args[0].action==='reconcile') {
+        calls.verifyJobs=(calls.verifyJobs||[]).concat(params.args[0].verify_job_id);
+        if(params.target.tabId===opts.unreadableTab) throw Error('DOM unreadable');
+        return [{result:opts.recoveryByTab?.[params.target.tabId]||opts.recoveryEvidence||
+          {status:'read',chat_url:CHAT,delivery_evidence:'unknown',evidence_kind:'unconfirmed'}}];
+      }
       if(opts.driverResults?.length) return [{result:opts.driverResults.shift()}];
       return [{result:{
         status:'sent',chat_url:params.args[0].chat_url??CHAT,message:'fixture send clicked',
@@ -276,6 +283,50 @@ test('a queued reconcile job performs no Send and forwards only boolean evidence
   assert.equal(out.execution_evidence,'page_completed');
   assert.deepEqual(f.calls.injections,[38,38]);
   assert.deepEqual(f.calls.created,[]);
+});
+
+test('unknown start without URL reconciles only a unique exact marker in already-open Chrome tabs',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'launcher-no-url-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const marker=url=>({status:'read',chat_url:url,delivery_evidence:'sent',
+    evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  for(const [name,matches,unreadable,delivered] of [
+    ['single',[17],null,true],['missing',[],null,false],
+    ['ambiguous',[17,18],null,false],['unreadable',[17],18,false],
+  ]) {
+    const q=new FileQueue(join(dir,name+'.json'),{desktop:'test-'+'x'.repeat(32)});
+    await q.initialize();
+    const original=await q.enqueue({action:'start',prompt:'Original only — do not send twice'});
+    await q.claim('desktop');
+    await q.report('desktop',{job_id:original.id,status:'needs_review',
+      message:'Frame removed after Send'});
+    const probe=await q.reconcile(original.id,'probe-'+name);
+    const job=await q.claim('desktop');
+    assert.equal(job.action,'reconcile');
+    assert.equal(job.chat_url,null);
+    assert.equal(job.prompt,null);
+    const f=fixture([{id:17,url:CHAT},{id:18,url:OTHER},
+      {id:19,url:'https://example.com/c/unrelated'}],{
+      unreadableTab:unreadable,recoveryByTab:{
+        17:matches.includes(17)?marker(CHAT):{status:'read',delivery_evidence:'unknown'},
+        18:matches.includes(18)?marker(OTHER):{status:'read',delivery_evidence:'unknown'},
+      },
+    });
+    const result=await f.execute(job);
+    await q.report('desktop',{job_id:probe.id,...result});
+    const source=q.status(original.id);
+    assert.equal(source.status,delivered?'sent':'needs_review',name);
+    assert.equal(source.result_chat_url,delivered?CHAT:null,name);
+    assert.equal((await q.reconcile(original.id,'probe-'+name)).id,probe.id,
+      'same read-only request stays idempotent after URL recovery');
+    assert.equal(source.model_status,undefined,'page proof does not invent model DONE');
+    assert.equal(!!source.page_completed_at,delivered,name);
+    assert.deepEqual(f.calls.created,[],'no new tab');
+    assert.deepEqual(f.calls.updated,[],'never focus or navigate tabs');
+    assert.deepEqual(f.calls.injections,[17,17,18,18],'only existing ChatGPT chats inspected');
+    assert.deepEqual(f.calls.verifyJobs,[original.id,original.id],'same exact job marker');
+    assert.equal(JSON.stringify(result).includes('Original only'),false);
+  }
 });
 
 test('read reuses the conversation tab and passes the reply through',async()=>{

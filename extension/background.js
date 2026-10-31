@@ -282,7 +282,8 @@ async function execute(job) {
   if(job.action==='refresh_tools') return refreshPluginTools(job);
   if(!['start','continue','open','read','close','reconcile','book_stop'].includes(job.action))throw Error('Unsupported browser action');
   const prompt=['open','read','close','reconcile','book_stop'].includes(job.action)?null:preparePrompt(job);
-  if(job.action!=='start'&&!validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
+  if(job.action!=='start' && !(job.action==='reconcile'&&!job.chat_url) &&
+    !validChatUrl(job.chat_url))throw Error('Invalid ChatGPT conversation URL');
   if(job.action==='close') return closeChat(job,driverScript());
   if(job.action==='book_stop') {
     const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/*'}))
@@ -295,6 +296,31 @@ async function execute(job) {
       return {status:'needs_review',chat_url:job.chat_url,message:'Book Stop result not confirmed'};
     return {status:observed.status,chat_url:observed.chat_url||null,message:observed.message||'',
       execution_evidence:observed.execution_evidence==='page_completed'?'page_completed':'unknown'};
+  }
+  if(job.action==='reconcile'&&!job.chat_url) {
+    // Scan existing conversations only; the page driver returns marker evidence, never text.
+    const tabs=(await chrome.tabs.query({url:'https://chatgpt.com/c/*'}))
+      .filter(t=>Number.isInteger(t.id)&&validChatUrl(t.url));
+    const matches=new Map();
+    let unreadable=false;
+    const script=driverScript();
+    for(const tab of tabs) {
+      try {
+        const found=(await runDriver(script,tab,job))?.result;
+        if(!found||found.status!=='read') {unreadable=true;continue;}
+        if(found.delivery_evidence!=='sent')continue;
+        if(!['user_message_marker','conversation_marker'].includes(found.evidence_kind)||
+          !sameConversationUrl(found.chat_url,tab.url)) {unreadable=true;continue;}
+        matches.set(new URL(found.chat_url).pathname.replace(/\/+$/,''),found);
+      } catch {unreadable=true;}
+    }
+    if(unreadable||matches.size!==1)return {status:'read',chat_url:null,
+      delivery_evidence:'unknown',evidence_kind:'unconfirmed',execution_evidence:'unknown',
+      message:'No unique verified marker in already-open ChatGPT conversations'};
+    const found=[...matches.values()][0];
+    return {status:'read',chat_url:found.chat_url,delivery_evidence:'sent',
+      evidence_kind:found.evidence_kind,
+      execution_evidence:found.execution_evidence==='page_completed'?'page_completed':'unknown'};
   }
   const tab=await openChatTab(job);
   await awaitTab(tab.id);
