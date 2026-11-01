@@ -188,6 +188,32 @@ for(const restDue of [false,true]) test(`blocked Stop cannot deadlock ${restDue?
   await f.q.tick();assert.equal(await f.q.claim('desktop'),null,'one successor after exhausted Stop');
 });
 
+test('reader progress followed by silence replaces the chat after blocked Stop; recent RKB activity does not',async t=>{
+  for(const recent of [false,true]) {
+    const f=await fixture(t);
+    const first=await f.start();await f.deliver(first);
+    await f.q.modelReport({job_id:first.job_id,status:'progress'});
+    f.advance(5*60_000);
+    const last=new Date(f.now()).toISOString();
+    f.advance(21*60_000);
+    await f.activity(first,'staged',recent?new Date(f.now()).toISOString():last);
+    await f.q.tick();
+    const stop=await f.q.claim('desktop');
+    if(recent) {assert.equal(stop,null);continue;}
+    assert.equal(stop.action,'book_stop');
+    await f.q.report('desktop',{job_id:stop.id,status:'blocked',chat_url:CHAT,
+      message:'Exact latest book turn or composer not confirmed'});
+    await f.q.tick();
+    const next=await f.q.claim('desktop');
+    assert.equal(next?.action,'start');
+    assert.equal(next.book_task_id,first.job_id);
+    assert.equal(next.handoff_reason,'book_silent');
+    assert.match(next.own_text,new RegExp(ING1));
+    assert.equal(f.q.status(first.job_id).model_status,'progress');
+    await f.q.tick();assert.equal(await f.q.claim('desktop'),null);
+  }
+});
+
 test('uncertain book delivery cannot create a second writer before confirmed Stop',async t=>{
   const f=await fixture(t);
   const first=await f.start();
