@@ -242,7 +242,9 @@ try {
   Write-Host 'Keep only one Launcher extension enabled (disable the old copy if installed elsewhere).'
   Write-Host 'When Chrome reloads, active and installed revisions are reported to MCP.'
 } catch {
-  $code = [string]$_.Exception.Message
+  $code = if($_.Exception.Message -cmatch '^[a-z][a-z0-9_]{0,59}$') {
+    [string]$_.Exception.Message
+  } else { $_.Exception.GetType().Name+'_'+$_.Exception.HResult.ToString('X8') }
   $code = ($code -replace '[^A-Za-z0-9_-]','_').ToLowerInvariant()
   if($code.Length -gt 60 -or $code.Length -lt 1) {$code='updater_failed'}
   try { Report-Status 'error' $code } catch {}
