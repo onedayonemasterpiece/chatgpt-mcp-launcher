@@ -1083,10 +1083,10 @@ export class FileQueue {
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
       const complete=this.#bookTurnReleased(job);
-      const finished=runnable&&job.status==='sent'&&complete&&
+      const finished=runnable&&job.status==='sent'&&(MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at)&&
         checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at)&&
         Date.parse(activity.last_operation_at)>Date.parse(job.book_activity_at_creation||job.created_at);
-      // Silence permits an exact Stop attempt, never rest or a concurrent successor.
+      // A finished Stop attempt is not proof the model completed its turn.
       const stale=this.#bookSilent(task,job,now);
       const silent=(stale&&!finished)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
