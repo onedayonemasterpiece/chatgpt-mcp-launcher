@@ -24,11 +24,12 @@ const clientSafetyMarker=s=>typeof s==='string'&&
 // Legacy/missing/corrupt counts are unknown; never infer a zero from old job history.
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
-function handoffPrefix(url, sourcePrompt, nextPrompt, jobId) {
+function handoffPrefix(url, sourcePrompt, nextPrompt, jobId, internalBook=false) {
   // Chrome validates the FINAL payload, after claim() adds callbackFooter.
   const budget=MAX_PROMPT-callbackFooter(jobId).length;
   const intro='(Продолжение работы из чата '+url+'. Launcher открыл НОВОЕ окно вместо дальнейшего продолжения старого. '+
-    'Используй предыдущий чат как контекст; не запускай второй параллельный экземпляр задания.)\n\n';
+    (internalBook?'':'Используй предыдущий чат как контекст; ')+
+    'не запускай второй параллельный экземпляр задания.)\n\n';
   const suffix='Текущее поручение (выполни его без потери деталей):\n';
   if(intro.length+suffix.length+nextPrompt.length>budget) {
     throw Error('Handoff plus callbackFooter exceeds 30000 characters; shorten the new prompt before retrying. Nothing was sent.');
@@ -526,7 +527,7 @@ export class FileQueue {
         (internalBook&&(args.book_stale||args.book_window_age)));
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
       const jobId=randomUUID();
-      const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId):null;
+      const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId,internalBook):null;
       // Reject before queue admission: this exact payload is what Chrome's
       // preparePrompt validates, including the callback footer added at claim.
       if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
