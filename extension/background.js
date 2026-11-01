@@ -407,7 +407,13 @@ async function sendHeartbeat(config) {
   return version;
 }
 async function poll() {
-  if(polling) return {busy:true};
+  if(polling) {
+    try {
+      const {config}=await api.get('config');
+      await sendHeartbeat(config);
+      return {busy:true};
+    } catch(err) {return {busy:true,error:String(err.message||err)};}
+  }
   polling=true;
   try {
     const {config}=await api.get('config');
