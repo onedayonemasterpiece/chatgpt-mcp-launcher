@@ -247,6 +247,7 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   assert.equal(replacement.action,'start');
   assert.equal(replacement.previous_chat_url,CHAT);
   assert.equal(replacement.handoff_reason,'book_silent');
+  assert.doesNotMatch(replacement.own_text,/Используй предыдущий чат как контекст/);
   assert.equal(replacement.slack_thread_url,null);
   await f.q.tick();
   assert.equal(await f.q.claim('desktop'),null);

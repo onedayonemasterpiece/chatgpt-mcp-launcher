@@ -64,6 +64,7 @@ test('a freshly started chat begins at zero and gets five (not six) confirmed co
   assert.equal(worker.chat_url,null,'never send the sixth prompt to the old tab');
   assert.match(worker.own_text,/Sixth task/);
   assert.match(worker.own_text,/Original owner instruction/,'include the initial prompt when retained');
+  assert.match(worker.own_text,/Используй предыдущий чат как контекст/);
   assert.match(worker.own_text,/https:\/\/chatgpt\.com\/c\//);
   assert.equal(worker.own_text.includes('Служебное:'),false,'the callback footer is separate');
   const delivered=await q.report('desktop',{job_id:next.id,status:'sent',chat_url:NEW_URL});
