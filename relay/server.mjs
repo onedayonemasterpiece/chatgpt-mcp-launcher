@@ -17,7 +17,7 @@ const INSTRUCTIONS = [
   '2. Result: ChatGPT itself reports back through MCP. chatgpt_task_status(job_id) shows model_status (started, then done/failed) and model_summary. Fallback if it never reports: chatgpt_read_reply(chat_ref = chat_id). For needs_review or unconfirmed execution, use chatgpt_reconcile(job_id): read-only proof of the exact job marker and (if observable) its finished assistant reply. Page completion is separate from model done; no proof keeps uncertainty.',
   '3. Follow-up: chatgpt_continue(chat_ref = chat_id, prompt). The launcher permits at most FIVE delivered continuations per real chat_id; at count 5, or whenever an old count is unknown/missing/null, this call automatically creates ONE new ChatGPT chat with context. Follow the NEW chat_id in chatgpt_task_status. A new start begins at count 0.',
   '4. Lost a chat_id: chatgpt_list_chats.',
-  'Autonomous RKB books: chatgpt_start(book: {books:[{ingestion_id}], continuation_prompt}) keeps an ordered list. RKB import activity (not ChatGPT/model) determines book finalization/blocker. Completion of a ChatGPT turn can start another turn; after RKB finalized/done the next book starts in a new chat. Two replacement chats without RKB operations produce one factual Slack alert.',
+  'Autonomous RKB books: chatgpt_start(book: {books:[{ingestion_id, title?}], continuation_prompt}) keeps an ordered list. RKB import activity (not ChatGPT/model) determines book finalization/blocker. Completion of a ChatGPT turn can start another turn; after RKB finalized/done the next book starts in a new chat. Two replacement chats without RKB operations produce one factual Slack alert.',
   '5. Optional: when a conversation is finished, chatgpt_close_chat(chat_ref = chat_id) closes its tab to save memory; the chat itself stays.',
   'Events: subscribe to chatgpt_launcher.job_update to be woken when a job finishes, is blocked/failed/needs review/expired, its tab is closed, or the agent goes silent. execution separates work from delivery: awaiting_confirmation, started, progress, page_completed (read-only observation, not model done), done, failed, unconfirmed (no confirmation).',
   'Coordination (optional reminder): chatgpt_coordination_set(goal, min_agents, idle_minutes) and subscribe to chatgpt_launcher.coordination_reminder; you are reminded while fewer agents than min_agents report started/progress for longer than idle_minutes. Pause only with a reason and a duration; close it explicitly when the whole work is done or cancelled.',
@@ -43,7 +43,8 @@ const TOOL_LIST = [
       description:'Durable ordered reading of 1-32 books; RKB authoritative for progress and completion.',
       properties:{books:{type:'array',minItems:1,maxItems:32,items:{type:'object',properties:{
         ingestion_id:{type:'string',description:'Canonical ingestion UUID required by RKB read-only activity API.'},
-        telegram_original:{type:'string',description:'Optional saved Telegram original locator associated with ingestion_id.'}},
+        telegram_original:{type:'string',description:'Optional saved Telegram original locator associated with ingestion_id.'},
+        title:{type:'string',maxLength:300,description:'Optional book title shown first in ChatGPT prompts and Slack notices.'}},
         required:['ingestion_id'],additionalProperties:false}},
         continuation_prompt:{type:'string',description:'Full follow-up text; each new chat begins with book_ingest(status) on current ingestion.'}},
       required:['books','continuation_prompt'],additionalProperties:false}},
@@ -170,6 +171,20 @@ export function bookActivityReaderFromEnv() {
     return response.json();
   };
 }
+export function bookNoticeText(task) {
+  const message=task.kind==='no_progress'?
+    'Два новых окна подряд без новых операций RKB; задача остаётся активной':
+    task.state==='done'?'Список книг дочитан':'Импорт остановлен';
+  const position=(task.current_book_index+1)+'/'+task.total_books;
+  const bookAndId=task.title?'book=«'+task.title+'» '+position+'; ingestion_id='+task.ingestion_id:
+    'ingestion_id='+task.ingestion_id+'; book='+position;
+  return '[Launcher book-task / '+(task.kind==='no_progress'?'NO_PROGRESS':task.state.toUpperCase())+'] '+message+
+    '; '+bookAndId+
+    '; last_operation_at='+(task.last_operation_at||'null')+
+    '; accepted_pages='+(task.accepted_pages??'unknown')+
+    '; new_chats_without_progress='+task.no_progress_new_chats+
+    '; '+(task.terminal_summary||'');
+}
 function slackBookNotifierFromEnv() {
   const secret=process.env.LAUNCHER_SLACK_BOT_TOKEN;
   if(!secret)return null;
@@ -178,19 +193,11 @@ function slackBookNotifierFromEnv() {
     const m=/^\/archives\/([A-Z0-9]+)\/p(\d{10})(\d{6})$/.exec(url.pathname);
     if(url.protocol!=='https:'||!url.hostname.endsWith('.slack.com')||!m)
       throw Error('Invalid book Slack thread');
-    const message=task.kind==='no_progress'?
-      'Два новых окна подряд без новых операций RKB; задача остаётся активной':
-      task.state==='done'?'Список книг дочитан':'Импорт остановлен';
     const response=await fetch('https://slack.com/api/chat.postMessage',{
       method:'POST',headers:{Authorization:'Bearer '+secret,'Content-Type':'application/json'},
       body:JSON.stringify({channel:m[1],thread_ts:m[2]+'.'+m[3],
         client_msg_id:task.notice_id,
-        text:'[Launcher book-task / '+(task.kind==='no_progress'?'NO_PROGRESS':task.state.toUpperCase())+'] '+message+
-          '; ingestion_id='+task.ingestion_id+'; book='+(task.current_book_index+1)+'/'+task.total_books+
-          '; last_operation_at='+(task.last_operation_at||'null')+
-          '; accepted_pages='+(task.accepted_pages??'unknown')+
-          '; new_chats_without_progress='+task.no_progress_new_chats+
-          '; '+(task.terminal_summary||'')}),
+        text:bookNoticeText(task)}),
       signal:AbortSignal.timeout(10_000)
     });
     const result=await response.json();

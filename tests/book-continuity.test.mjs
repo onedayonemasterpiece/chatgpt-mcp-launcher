@@ -5,7 +5,7 @@ import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FileQueue} from '../relay/queue.mjs';
-import {makeRelay,bookActivityReaderFromEnv} from '../relay/server.mjs';
+import {makeRelay,bookActivityReaderFromEnv,bookNoticeText} from '../relay/server.mjs';
 
 const ING1='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const ING2='11111111-2222-3333-4444-555555555555';
@@ -42,6 +42,28 @@ async function fixture(t,{random=Math.random}={}) {
   };
   return {q,file,now,start,deliver,activity,advance(ms){time+=ms;}};
 }
+
+test('book title survives queue persistence and appears first in reader prompt and Slack notice; untitled stays unchanged',async t=>{
+  const f=await fixture(t);
+  const title='Кёнигсбергский зоопарк';
+  const first=await f.start([{ingestion_id:ING1,title}],'titled-book');
+  const claimed=await f.deliver(first);
+  assert.ok(claimed.own_text.startsWith(`(Книга 1 из 1: «${title}», ingestion_id=${ING1}`));
+  assert.equal(JSON.parse(await readFile(f.file,'utf8')).book_tasks[0].books[0].title,title);
+  await f.activity(first,'failed');await f.q.tick();
+  const reloaded=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+  await reloaded.initialize();
+  const notice=reloaded.pendingBookNotices()[0];
+  assert.equal(notice.title,title);
+  assert.ok(bookNoticeText(notice).includes(`book=«${title}» 1/1; ingestion_id=${ING1}`));
+  await assert.rejects(f.start([{ingestion_id:ING3,title:'x'.repeat(301)}],'too-long-title'),/book.books\[\].title/);
+
+  const legacy=await fixture(t);
+  const old=await legacy.start([{ingestion_id:ING2}],'untitled-book');
+  assert.ok((await legacy.deliver(old)).own_text.startsWith(`(Книга 1 из 1: ingestion_id=${ING2}`));
+  await legacy.activity(old,'failed');await legacy.q.tick();
+  assert.ok(bookNoticeText(legacy.q.pendingBookNotices()[0]).includes(`; ingestion_id=${ING2}; book=1/1;`));
+});
 
 test('30-minute active reading creates no browser probes or short tasks; real turn completion continues same chat',async t=>{
   const f=await fixture(t);

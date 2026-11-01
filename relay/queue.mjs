@@ -99,7 +99,7 @@ const bookFooter=deadline=>BOOK_FOOTER+' Рабочий период до '+new 
   'Launcher сам возобновит книгу после отдыха.';
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
-  return '(Книга '+(index+1)+' из '+task.books.length+': ingestion_id='+selector.ingestion_id+
+  return '(Книга '+(index+1)+' из '+task.books.length+': '+(selector.title?'«'+selector.title+'», ':'')+'ingestion_id='+selector.ingestion_id+
     (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
     '. Сначала book_ingest(status) по этому ingestion_id; это не предыдущая книга. '+
     'Принятые страницы не повторяй.)\n\n'+task.continuation_prompt;
@@ -420,6 +420,8 @@ export class FileQueue {
             throw Error('Each book needs a canonical ingestion_id (RKB activity API has no telegram_original lookup)');
           if(selector.telegram_original!==undefined)
             requireString(selector.telegram_original,'book.books[].telegram_original',1000);
+          if(selector.title!==undefined)
+            requireString(selector.title,'book.books[].title',300);
         }
         if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
           throw Error('Duplicate ingestion_id in book list');
@@ -983,7 +985,7 @@ export class FileQueue {
   }
   pendingBookNotices() {
     return this.#state.book_tasks.flatMap(t=>{
-      const shared={...this.#bookPublic(t),slack_thread_url:t.slack_thread_url};
+      const shared={...this.#bookPublic(t),title:t.books[t.index].title,slack_thread_url:t.slack_thread_url};
       if(!t.slack_thread_url)return [];
       if(t.state!=='active'&&!t.notice_sent_at)
         return [{...shared,kind:'terminal',notice_id:t.id}];
