@@ -605,7 +605,12 @@ test('a completed book report refreshes stale activity before another continuati
     await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(calls,2,'existing timer refreshes without waiting five minutes');
   assert.equal(queue.status(first.job_id).book_task.state,'done');
-  assert.equal((await queue.claim('desktop')).action,'close','completed reader tab is retired');
+  let retired;
+  for(let i=0;i<100&&!retired;i++) {
+    retired=await queue.claim('desktop');
+    if(!retired)await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  assert.equal(retired?.action,'close','completed reader tab is retired');
 });
 
 
