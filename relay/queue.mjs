@@ -16,7 +16,6 @@ const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
 const BOOK_SILENCE_MS = 20 * 60_000;
-const BOOK_WINDOW_MS = 90 * 60_000;
 const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
 const clientSafetyMarker=s=>typeof s==='string'&&
@@ -526,7 +525,7 @@ export class FileQueue {
       }
       const count=continuationCount(existingChat?.continuation_count);
       const rollOver=action==='continue'&&(count===null||(!internalBook&&count>=MAX_CONTINUATIONS)||
-        (internalBook&&(args.book_stale||args.book_window_age)));
+        (internalBook&&args.book_stale));
       const firstJob=rollOver?this.#state.jobs.find(j=>j.id===existingChat?.source_job_id):null;
       const jobId=randomUUID();
       const prefix=rollOver?handoffPrefix(target,firstJob?.prompt,prompt,jobId,internalBook):null;
@@ -565,7 +564,7 @@ export class FileQueue {
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(action==='book_stop'?{after_job_id:args.after_job_id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
-          handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':internalBook&&args.book_window_age?'book_window_age':count===null?'unknown_count':'limit_reached'}:{})
+          handoff_prefix:prefix,handoff_reason:internalBook&&args.book_stale?'book_silent':count===null?'unknown_count':'limit_reached'}:{})
       };
       this.#state.jobs.push(job);
       if(internalBook&&args.book_replacement) job.handoff_reason||='book_silent';
@@ -608,7 +607,7 @@ export class FileQueue {
       ...(original.book_task_id?{book_task_id:original.book_task_id,book_index:original.book_index,
         book_activity_at_creation:original.book_activity_at_creation,
         book_replacement:!!original.handoff_reason,book_stale:original.handoff_reason==='book_silent',
-        book_window_age:original.handoff_reason==='book_window_age',[BOOK_INTERNAL]:true}:{}),
+        [BOOK_INTERNAL]:true}:{}),
       request_id:key});
     if(book&&!cached) {
       book.job_id=job.job_id;book.last_enqueue_error=null;
@@ -1085,10 +1084,11 @@ export class FileQueue {
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
       const complete=this.#bookTurnReleased(job);
       const finished=runnable&&job.status==='sent'&&complete&&
-        checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at);
+        checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at)&&
+        Date.parse(activity.last_operation_at)>Date.parse(job.book_activity_at_creation||job.created_at);
       // Silence permits an exact Stop attempt, never rest or a concurrent successor.
       const stale=this.#bookSilent(task,job,now);
-      const silent=(stale&&!MODEL_FINAL.includes(job.model_status)&&!job.page_completed_at)||
+      const silent=(stale&&!finished)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       const predecessor=this.#unfinishedBookTurns(task).find(j=>j.id!==job.id);
@@ -1109,10 +1109,8 @@ export class FileQueue {
       if(silent||finished) {
         if(!url&&!silent)continue;
         const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===task.device_id);
-        const source=this.#state.jobs.find(j=>j.id===chat?.source_job_id);
-        const aged=finished&&source&&now-Date.parse(source.created_at)>=BOOK_WINDOW_MS;
         const count=continuationCount(chat?.continuation_count);
-        const replacement=silent||!url||aged||count===null;
+        const replacement=silent||!url||count===null;
         if(replacement&&task.last_replacement_at&&
           now-Date.parse(task.last_replacement_at)<BOOK_SILENCE_MS)continue;
         try {
@@ -1120,7 +1118,7 @@ export class FileQueue {
             ...(url?{chat_url:url}:{}),prompt:bookPrompt(task,task.index),device_id:task.device_id,
             request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
             book_activity_at_creation:activity?.last_operation_at||null,book_replacement:replacement,
-            book_stale:silent,book_window_age:!!aged,[BOOK_INTERNAL]:true});
+            book_stale:silent,[BOOK_INTERNAL]:true});
           task.job_id=next.job_id;task.last_enqueue_error=null;
           if(replacement)task.last_replacement_at=new Date(now).toISOString();
           changed=true;
