@@ -154,6 +154,11 @@ for(const restDue of [false,true]) test(`legacy unfinished predecessor blocks ${
   await q.tick();
   if(restDue)assert.ok(q.status(first.job_id).book_task.rest_until);
   else {
+    assert.equal(await q.claim('desktop'),null,'released turn without new RKB work waits');
+    f.advance(1);
+    await q.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+      last_operation_at:new Date(f.now()).toISOString(),accepted_pages:14,next_cursor:'40'});
+    await q.tick();
     const next=await q.claim('desktop');
     assert.ok(['start','continue'].includes(next.action));
     assert.equal(next.book_task_id,first.job_id);
@@ -285,6 +290,7 @@ test('finished turn waits for RKB readiness and then continues same chat even af
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+  f.advance(1);
   const oldOperation=new Date(f.now()).toISOString();
   await f.activity(first,'processing',oldOperation);
   await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Ordinary native wait'});
@@ -458,40 +464,41 @@ test('retry of an unsent silent-book handoff keeps book ownership and automatic 
   await assert.rejects(f.q.retry(handoff.id,'different-obsolete-retry'),/current book turn/);
 });
 
-test('book continuations stay in the same chat past five turns until its 90-minute lifetime',async t=>{
+test('book progress keeps its chat after 90 minutes; empty turns wait for existing silence recovery',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
-  const oldOp=new Date(f.now()-60_000).toISOString();
-  f.advance(21*60_000);
-  await f.activity(first,'staged',oldOp);
+  f.advance(100*60_000);
+  await f.activity(first);
+  await f.q.modelReport({job_id:first.job_id,status:'done'});
   await f.q.tick();
-  const stop=await f.q.claim('desktop');
-  assert.equal(stop.action,'book_stop');
-  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
-  await f.q.tick();
-  const replacement=await f.q.claim('desktop');
-  await f.q.report('desktop',{job_id:replacement.id,status:'sent',chat_url:NEXT});
-  await f.q.modelReport({job_id:replacement.id,status:'done'});
-  await f.q.tick();
-  // The ordinary task limit must not fragment a book into new chats.
-  for(let n=0;n<7;n++) {
-    const next=await f.q.claim('desktop');
+  let next=await f.q.claim('desktop');
+  for(let turn=0;turn<7;turn++) {
     assert.equal(next.action,'continue');
-    await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:NEXT});
+    assert.equal(next.chat_url,CHAT);
+    await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:CHAT});
+    f.advance(1);
+    await f.activity(first);
     await f.q.modelReport({job_id:next.id,status:'done'});
     await f.q.tick();
+    next=await f.q.claim('desktop');
   }
-  const eighth=await f.q.claim('desktop');
-  assert.equal(eighth.action,'continue');
-  await f.q.report('desktop',{job_id:eighth.id,status:'sent',chat_url:NEXT});
-  f.advance(90*60_000);
-  await f.activity(first,'staged',oldOp);
-  await f.q.modelReport({job_id:eighth.id,status:'done'});
+  assert.equal(next.action,'continue');
+  assert.equal(next.chat_url,CHAT);
+  await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:CHAT});
+  const lastOperation=new Date(f.now()).toISOString();
+  f.advance(2*60_000);
+  await f.activity(first,'staged',lastOperation); // Fresh status, no new operation.
+  await f.q.modelReport({job_id:next.id,status:'done'});
   await f.q.tick();
-  const later=await f.q.claim('desktop');
-  assert.equal(later.action,'start');
-  assert.equal(later.previous_chat_url,NEXT);
+  assert.equal(await f.q.claim('desktop'),null,'no immediate empty continuation loop');
+  f.advance(19*60_000);
+  await f.activity(first,'staged',lastOperation);
+  await f.q.tick();
+  const replacement=await f.q.claim('desktop');
+  assert.equal(replacement.action,'start');
+  assert.equal(replacement.handoff_reason,'book_silent');
+  assert.equal(replacement.previous_chat_url,CHAT);
 });
 
 test('one ingestion belongs to at most one live list, including its future books',async t=>{
@@ -641,6 +648,7 @@ test('cached-schema safety refusal stops a sent successor, including after resta
     const f=await fixture(t);
     const first=await f.start();
     await f.deliver(first);
+    f.advance(1);
     await f.activity(first);
     await f.q.modelReport({job_id:first.job_id,status:'done'});
     await f.q.tick();
@@ -687,8 +695,9 @@ test('explicit client safety rejection stops only this book after queued continu
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
-  const oldOperation=new Date(f.now()-21*60_000).toISOString();
-  await f.activity(first,'staged',oldOperation); // RKB never received rejected stage.
+  f.advance(1);
+  const oldOperation=new Date(f.now()).toISOString();
+  await f.activity(first,'staged',oldOperation); // A prior read arrived; the rejected stage did not.
   await f.q.modelReport({job_id:first.job_id,status:'started'});
   await f.q.modelReport({job_id:first.job_id,status:'done'});
   await f.q.tick();
@@ -707,6 +716,7 @@ test('explicit client safety rejection stops only this book after queued continu
   assert.equal(f.q.pendingBookNotices()[0].kind,'terminal');
 
   await f.deliver(other,NEXT);
+  f.advance(1);
   await f.activity(other);
   await f.q.modelReport({job_id:other.job_id,status:'done',summary:'Normal turn completion'});
   await f.q.tick();
@@ -739,6 +749,7 @@ test('generic model blocked/done are only turn outcomes; narrow failure_kind is 
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+  f.advance(1);
   await f.activity(first);
   await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'done',
     failure_kind:'client_safety_rejection',summary:'false'}),/failure_kind requires blocked/);
