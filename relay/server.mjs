@@ -54,7 +54,7 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...PROPS},required:['prompt'],additionalProperties:false},
   },
   {
-    name:'chatgpt_read_reply',description:'Unreliable fallback (ChatGPT page markup often cannot be read; prefer model_status/model_summary): get the text of the last ChatGPT reply in a conversation (chat_ref = chat_id). Never types or sends. Returns job_id; chatgpt_task_status then has reply_text, last_user_text (the last message sent in that chat: use it to check whether your prompt arrived), and reply_generating = true while ChatGPT is still writing (read again later).',
+    name:'chatgpt_read_reply',description:'Read-only DOM fallback for a conversation (chat_ref = chat_id). Returns job_id; poll chatgpt_task_status for reply_text, last_user_text (truncated, NOT proof of non-delivery), and reply_generating. On unreadable DOM, task_status may additionally include a real JPEG ImageContent if the user opened the extension popup on that active chat to grant activeTab; no permission means text-only result. No prompts sent.',
     inputSchema:{type:'object',properties:{chat_ref:CHAT_REF,chat_url:CHAT_URL,...COMMON},additionalProperties:false},
   },
   {
@@ -62,7 +62,7 @@ const TOOL_LIST = [
     inputSchema:{type:'object',properties:{job_id:{type:'string',description:'Exact needs_review or sent/unconfirmed start/continue job_id; not a conversation ID.'},...COMMON},required:['job_id'],additionalProperties:false},
   },
   {
-    name:'chatgpt_task_status', description:'Status by job_id: queued/claimed, sent, read, opened, blocked (nothing sent), expired (never claimed), needs_review (may be sent; reconcile before any repeat/continue), failed. Exposes current chat_id/chat_url, continuation_count (integer 0..5 or null unknown), and for automatic new-chat handoff previous_chat_url plus delivery_action=start; model_status is separate. Never invent a new chat ID; no in-flight job stays claimed over 15 min.',
+    name:'chatgpt_task_status', description:'Status by job_id: queued/claimed, sent, read, opened, blocked (nothing sent), expired (never claimed), needs_review (may be sent; reconcile before any repeat/continue), failed. Exposes chat_id/chat_url, continuation_count, delivery_action, and separate model_status. For unreadable DOM read/reconcile jobs it can return a real JPEG ImageContent after the user grants activeTab via the popup on the exact chat; the status text never contains base64. Missing screenshot does not prove non-delivery.',
     inputSchema:{type:'object',properties:{job_id:{type:'string',description:'job_id returned by start/continue/read_reply/open.'}},required:['job_id'],additionalProperties:false},
   },
   {
@@ -330,7 +330,9 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
             } else if (name==='chatgpt_coordination_close') {
               value=await queue.coordinationClose(args.reason);
             } else throw new Error('Unknown tool');
-            out=rpcOk(data.id,wrap(resultText(value)));
+            const jpeg=name==='chatgpt_task_status'?queue.screenshot(args.job_id):null;
+            out=rpcOk(data.id,wrap(jpeg?{content:[{type:'text',text:JSON.stringify(value)},
+              {type:'image',data:jpeg,mimeType:'image/jpeg'}]}:resultText(value)));
           } catch(err) {out=rpcOk(data.id,wrap(resultText({error:err.message},true)));}
         } else out=rpcError(data.id,-32601,'Unknown method');
         logged();
@@ -355,7 +357,7 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
           return send(res,200,{job:verified ? await queue.claim(deviceId) : null});
         }
         if (url.pathname==='/device/report' && req.method==='POST') {
-          const data = await readJson(req,256*1024); // room for a reply of up to 20,000 characters
+          const data = await readJson(req,1024*1024); // bounded JPEG on read-only reports
           if(data?.type==='heartbeat') {
             const status=await queue.observeHeartbeat(deviceId,data,req.headers['x-launcher-revision']);
             return send(res,200,{ok:true,reported_revision:status.active_revision,commands_enabled:status.commands_enabled});

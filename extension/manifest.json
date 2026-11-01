@@ -4,7 +4,7 @@
   "version": "0.3.17",
   "description": "Launch or continue your own ChatGPT chats from an authenticated MCP relay.",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "permissions": ["storage", "alarms", "tabs", "scripting", "activeTab"],
   "host_permissions": ["https://chatgpt.com/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "background": {"service_worker": "background.js"},

@@ -1173,6 +1173,12 @@ export class FileQueue {
       return {ok:true,job_id:id,model_status:job.model_status};
     });
   }
+  screenshot(jobId) {
+    const job=this.#state.jobs.find(j=>j.id===jobId);
+    return job&&['read','reconcile'].includes(job.action)&&
+      ['read','needs_review'].includes(job.status)&&job.result_chat_url===job.chat_url ?
+      job.screenshot_jpeg||null:null;
+  }
   status(jobId) {
     const now=this.now();
     const restChanged=this.#advanceBookRest(now);
@@ -1309,6 +1315,17 @@ export class FileQueue {
         job.last_user_text=typeof data.last_user_text==='string'?data.last_user_text.slice(0,2000):null;
       }
       job.reported_at=new Date(this.now()).toISOString();
+      // JPEG evidence is volatile, private, and omitted from persisted job JSON
+      // and public status. Reuse the existing bounded job list, retain at most 8.
+      if(['read','reconcile'].includes(job.action)&&typeof data.screenshot_jpeg==='string'&&
+        data.screenshot_jpeg.length<=524288&&/^[A-Za-z0-9+/]+={0,2}$/.test(data.screenshot_jpeg)) {
+        const jpeg=Buffer.from(data.screenshot_jpeg,'base64');
+        if(jpeg.length>=4&&jpeg[0]===255&&jpeg[1]===216&&jpeg.at(-2)===255&&jpeg.at(-1)===217) {
+          Object.defineProperty(job,'screenshot_jpeg',{value:data.screenshot_jpeg,configurable:true});
+          for(const old of this.#state.jobs.filter(j=>j.screenshot_jpeg).slice(0,-8))
+            delete old.screenshot_jpeg;
+        }
+      }
       if(job.action==='book_stop'&&job.status==='read'&&data.execution_evidence==='page_completed') {
         const source=this.#state.jobs.find(j=>j.id===job.after_job_id);
         if(source&&!MODEL_FINAL.includes(source.model_status)&&!source.page_completed_at) {

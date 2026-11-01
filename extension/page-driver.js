@@ -445,6 +445,8 @@
     // Exclude ALL editable descendants, not just the recognized composer.
     const mainMatch=composerKnown && roots.length===1 && !inDraft && hasMarker(roots[0]);
     const evidence_kind=userMatch?'user_message_marker':mainMatch?'conversation_marker':'unconfirmed';
+    const unreadable=evidence_kind==='unconfirmed' && !userTurns.length &&
+      [...document.querySelectorAll('iframe')].some(f=>{try{return !f.contentDocument;}catch{return true;}});
     // Main text alone cannot establish which assistant turn answers this job.
     // Require a distinct, visible assistant turn immediately after its user turn.
     const turns=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
@@ -456,7 +458,8 @@
       delivery_evidence:evidence_kind==='unconfirmed'?'unknown':'sent',evidence_kind,
       execution_evidence:complete?'page_completed':'unknown',
       message:complete?'Assistant reply after this job marker is complete (page evidence only)':
-        evidence_kind==='unconfirmed'?'No positive delivery evidence; original job remains uncertain':
+        evidence_kind==='unconfirmed'?'No positive delivery evidence; original job remains uncertain'+
+          (unreadable?'; The conversation text is not readable on this page':''):
         'Original job marker was observed; assistant completion is not proven'};
   }
   async function stopBook(job) {

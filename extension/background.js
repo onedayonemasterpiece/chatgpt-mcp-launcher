@@ -191,6 +191,25 @@ async function openChatTab(job,{fresh=false}={}) {
   if(Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId,{focused:true});
   return tab;
 }
+async function captureUnreadable(tab,chatUrl) {
+  if(!Number.isInteger(tab?.id)||!Number.isInteger(tab?.windowId)||!validChatUrl(chatUrl))return null;
+  // captureVisibleTab captures the ACTIVE tab, not a tabId. Verify both sides
+  // of the capture; activeTab must already be granted by opening the popup there.
+  const exact=async()=>{
+    const [current,active]=await Promise.all([chrome.tabs.get(tab.id),
+      chrome.tabs.query({active:true,windowId:tab.windowId})]);
+    return current?.active===true&&sameConversationUrl(current.url,chatUrl)&&
+      active.length===1&&active[0].id===tab.id&&sameConversationUrl(active[0].url,chatUrl);
+  };
+  try {
+    if(!await exact())return null;
+    const jpeg=await chrome.tabs.captureVisibleTab(tab.windowId,{format:'jpeg',quality:45});
+    if(!await exact())return null;
+    return typeof jpeg==='string'&&jpeg.length<=524311&&
+      /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(jpeg) ?
+      jpeg.slice('data:image/jpeg;base64,'.length):null;
+  } catch {return null;} // No user-gesture grant, or Chrome refused: DOM result still wins.
+}
 function driverScript() {
   return BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
 }
@@ -330,6 +349,11 @@ async function execute(job) {
   if(job.action==='start'||job.action==='continue') await waitAfterOpening();
   try { result=await runDriver(script,tab,{...job,prompt}); }
   catch(err) {
+    if(['read','reconcile'].includes(job.action)&&job.chat_url) {
+      const screenshot_jpeg=await captureUnreadable(tab,job.chat_url);
+      if(screenshot_jpeg)return {status:'needs_review',chat_url:job.chat_url,screenshot_jpeg,
+        message:'Automation failed or was interrupted: '+err.message+'. Check the tab before retrying.'};
+    }
     // A single Send click can navigate/unmount Chrome's execution frame before
     // executeScript returns. Re-inject READ-ONLY into the live frame: an exact
     // job marker proves delivery; an unreadable or absent marker stays unknown.
@@ -365,6 +389,14 @@ async function execute(job) {
       result.result.evidence_kind:'unconfirmed';
     out.execution_evidence=result.result.execution_evidence==='page_completed'?'page_completed':'unknown';
   }
+  if(['read','reconcile'].includes(job.action)&&job.chat_url&&
+      sameConversationUrl(result.result.chat_url,job.chat_url)&&
+      (result.result.message?.includes('The conversation text is not readable on this page')||
+        (job.action==='read'&&!result.result.reply_text&&
+          /history_error=true|inaccessible_frames=[1-9]/.test(result.result.message||'')))) {
+    const screenshot_jpeg=await captureUnreadable(tab,job.chat_url);
+    if(screenshot_jpeg)out.screenshot_jpeg=screenshot_jpeg;
+  }
   if(job.action==='read') {
     out.reply_text=typeof result.result.reply_text==='string' ? result.result.reply_text.slice(0,20000) : null;
     out.reply_generating=result.result.reply_generating===true;
@@ -372,11 +404,12 @@ async function execute(job) {
   }
   return out;
 }
-async function flushPending(config) {
+async function flushPending(config,screenshot_jpeg=null) {
   const {pendingReport}=await api.get('pendingReport');
   if(!pendingReport) return;
   const {job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind,execution_evidence}=pendingReport;
-  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind,execution_evidence});}
+  try {await relayFetch(config,'POST','/device/report',{job_id,status,chat_url,message,reply_text,reply_generating,last_user_text,page_state,dom_probe,delivery_evidence,evidence_kind,execution_evidence,
+    ...(screenshot_jpeg?{screenshot_jpeg}:{})});}
   catch(err) {
     // A report the relay refuses outright would be resent forever and block
     // heartbeats and every later job. Network errors and 401 stay pending.
@@ -431,9 +464,11 @@ async function poll() {
     try {result=await execute(job);}
     catch(err) {result={status:'needs_review',
       message:'Automation failed or was interrupted: '+err.message+'. Check the tab before retrying.'};}
-    await api.set({pendingReport:{job_id:job.id,...result}});
-    await flushPending(config);
-    return {job_id:job.id,...result,version};
+    // Raw pixels are never persisted in chrome.storage or included in popup status.
+    const {screenshot_jpeg,...report}=result;
+    await api.set({pendingReport:{job_id:job.id,...report}});
+    await flushPending(config,screenshot_jpeg);
+    return {job_id:job.id,...report,version};
   } catch(err) {
     await api.set({lastError:{message:String(err.message||err).slice(0,350),at:new Date().toISOString()}});
     return {error:String(err.message||err)};

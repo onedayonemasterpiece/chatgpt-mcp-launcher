@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {FileQueue} from '../relay/queue.mjs';
+import {makeRelay} from '../relay/server.mjs';
 
 const source=await readFile(new URL('../extension/background.js',import.meta.url),'utf8');
 const CHAT='https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -23,7 +24,12 @@ function fixture(openTabs=[],opts={}) {
     runtime:{getURL:()=>'',reload:()=>{},onInstalled:{addListener:()=>{}},
       onStartup:{addListener:()=>{}},onMessage:{addListener:()=>{}}},
     tabs:{
-      query:async()=>[...tabs.values()],
+      query:async params=>params?.active ? [...tabs.values()].filter(t=>t.active&&t.windowId===params.windowId) : [...tabs.values()],
+      captureVisibleTab:async(windowId,options)=>{
+        (calls.captures||=([])).push({windowId,...options});
+        if(opts.captureError)throw Error('activeTab not granted');
+        return opts.jpeg;
+      },
       update:async(id,params)=>{calls.updated.push({id,...params});return tabs.get(id);},
       reload:async id=>{calls.reloads.push(id);},
       remove:async id=>{calls.removed=(calls.removed||[]).concat(id);tabs.delete(id);},
@@ -328,6 +334,88 @@ test('unknown start without URL reconciles only a unique exact marker in already
     assert.deepEqual(f.calls.verifyJobs,[original.id,original.id],'same exact job marker');
     assert.equal(JSON.stringify(result).includes('Original only'),false);
   }
+});
+
+test('unreadable DOM delivers actual JPEG ImageContent, while capture denial and foreign tab fail open',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'launcher-jpeg-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const file=join(dir,'queue.json');
+  const mcpToken='m'.repeat(40),deviceToken='d'.repeat(40),revision='a'.repeat(40);
+  const {server}=await makeRelay({file,mcpToken,devices:{desktop:deviceToken},
+    bookActivityReader:null,bookNotifier:null});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const base='http://127.0.0.1:'+server.address().port;
+  const devHeaders={Authorization:'Bearer '+deviceToken,'X-Launcher-Device-Id':'desktop',
+    'X-Launcher-Revision':revision,'Content-Type':'application/json'};
+  const post=async(path,body,headers=devHeaders)=>{
+    const response=await fetch(base+path,{method:'POST',headers,body:JSON.stringify(body)});
+    assert.equal(response.status,200);
+    return response.json();
+  };
+  const mcp=async(name,args)=>(await post('/mcp',{jsonrpc:'2.0',id:1,
+    method:'tools/call',params:{name,arguments:args}},
+    {Authorization:'Bearer '+mcpToken,'Content-Type':'application/json'})).result.content;
+  const queued=JSON.parse((await mcp('chatgpt_read_reply',{chat_url:CHAT}))[0].text);
+  await post('/device/report',{type:'heartbeat',schema_version:1,commands_enabled:true,
+    active_revision:revision,installed_revision:revision,runtime_integrity:'ok',
+    manifest_version:'0.3.18',runtime_loaded_at:new Date().toISOString(),updater:{state:'current'}});
+  // Valid one-pixel JPEG fixture; Chrome supplies the bytes via captureVisibleTab.
+  const jpeg='/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA4KCw0LCQ4NDA0QDw4RFiQXFhQUFiwgIRokNC43NjMuMjI6QVNGOj1OPjIySGJJTlZYXV5dOEVmbWVabFNbXVn/2wBDAQ8QEBYTFioXFypZOzI7WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVn/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD0miiigD//2Q==';
+  const unreadable={status:'read',chat_url:CHAT,reply_text:null,reply_generating:true,
+    message:'No ChatGPT reply in this conversation yet; UI history_error=false, frame_messages=0, inaccessible_frames=3'};
+  const f=fixture([{id:30,url:CHAT,active:true},{id:31,url:OTHER,active:false}],{
+    jpeg:'data:image/jpeg;base64,'+jpeg,
+    state:{config:{url:base,token:deviceToken,deviceId:'desktop',enabled:true}},
+    driverResults:[unreadable]});
+  f.sandbox.sendHeartbeat=async()=>({update_state:'current'});
+  f.sandbox.relayFetch=async(_config,method,path,body)=>{
+    const response=await fetch(base+path,{method,headers:devHeaders,
+      ...(body?{body:JSON.stringify(body)}:{})});
+    assert.equal(response.status,200);
+    return response.json();
+  };
+  const worker=await f.sandbox.poll();
+  assert.equal(worker.status,'read');
+  assert.equal(worker.screenshot_jpeg,undefined,'popup/poll results never expose pixels');
+  assert.deepEqual(f.calls.captures,[{windowId:1,format:'jpeg',quality:45}]);
+  assert.equal(JSON.stringify(f.state).includes(jpeg),false,'browser storage has no JPEG');
+  const content=await mcp('chatgpt_task_status',{job_id:queued.id});
+  assert.equal(content.length,2);
+  assert.equal(content[1].type,'image');
+  assert.equal(content[1].mimeType,'image/jpeg');
+  assert.equal(content[1].data,jpeg,'actual captured pixels, not a link or placeholder');
+  assert.equal(JSON.parse(content[0].text).status,'read');
+  assert.equal(content[0].text.includes(jpeg),false,'no image in JSON text');
+  assert.equal((await readFile(file,'utf8')).includes(jpeg),false,'no JPEG on disk');
+  const denied=fixture([{id:40,url:CHAT,active:true}],{captureError:true,
+    driverResults:[unreadable]});
+  const noGrant=await denied.execute({action:'read',chat_url:CHAT,id:'denied'});
+  assert.equal(noGrant.status,'read');
+  assert.equal(noGrant.screenshot_jpeg,undefined);
+  assert.equal(denied.calls.captures.length,1,'Chrome denied activeTab, no read failure');
+  const other=fixture([{id:50,url:CHAT,active:true},{id:51,url:OTHER,active:false}],{
+    jpeg:'data:image/jpeg;base64,'+jpeg,driverResults:[unreadable]});
+  const query=other.sandbox.chrome.tabs.query;
+  other.sandbox.chrome.tabs.query=async params=>params?.active ?
+    [{id:51,url:OTHER,active:true,windowId:1}] : query(params);
+  const crossTab=await other.execute({action:'read',chat_url:CHAT,id:'foreign'});
+  assert.equal(crossTab.status,'read');
+  assert.equal(crossTab.screenshot_jpeg,undefined,'foreign active tab never enters result');
+  assert.equal(other.calls.captures,undefined,'foreign active tab was never captured');
+  const reconcile=fixture([{id:70,url:CHAT,active:true}],{
+    jpeg:'data:image/jpeg;base64,'+jpeg,recoveryEvidence:{status:'read',chat_url:CHAT,
+      delivery_evidence:'unknown',evidence_kind:'unconfirmed',execution_evidence:'unknown',
+      message:'No positive delivery evidence; The conversation text is not readable on this page'}});
+  const rec=await reconcile.execute({action:'reconcile',chat_url:CHAT,
+    verify_job_id:'6ad89e0c-b984-83ea-88ba-dd29b57ee40b',id:'reconcile-unreadable'});
+  assert.equal(rec.delivery_evidence,'unknown','pixels cannot prove job delivery');
+  assert.equal(rec.screenshot_jpeg,jpeg,'exact chat reconciliation has visual evidence');
+  const readable=fixture([{id:60,url:CHAT,active:true}],{
+    jpeg:'data:image/jpeg;base64,'+jpeg,driverResults:[{...unreadable,
+      reply_text:'Actual answer',message:'Last ChatGPT reply read'}]});
+  assert.equal((await readable.execute({action:'read',chat_url:CHAT,id:'normal'})).reply_text,'Actual answer');
+  assert.equal(readable.calls.captures,undefined,'successful DOM read does not capture');
 });
 
 test('read reuses the conversation tab and passes the reply through',async()=>{
