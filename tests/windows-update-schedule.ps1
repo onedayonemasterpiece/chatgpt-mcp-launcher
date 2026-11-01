@@ -43,6 +43,19 @@ Set-Content -LiteralPath (Join-Path $Root 'receipt.txt') -Value $Root -NoNewline
     if ($busyHeld) { $busyMutex.ReleaseMutex() }
     $busyMutex.Dispose()
   }
+  # Localized platform messages must leave a useful, payload-free error code.
+  $latest = $ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Latest-Revision'}, $true)
+  $fixture = Join-Path $Root 'localized-updater.ps1'
+  $localized = 'function Latest-Revision { throw [System.IO.IOException]::new("' + [char]0x041e + [char]0x0448 + [char]0x0438 + [char]0x0431 + [char]0x043a + [char]0x0430 + '") }'
+  $ast.Extent.Text.Replace($latest.Extent.Text, $localized) | Set-Content -LiteralPath $fixture -Encoding UTF8
+  & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixture -Manual -Root $Root
+  $localizedExit = $LASTEXITCODE
+  $localizedStatus = Get-Content -Raw (Join-Path $Root 'source\chatgpt-launcher\extension\updater-status.json') | ConvertFrom-Json
+  if ($localizedExit -ne 1 -or $localizedStatus.state -ne 'error' -or $localizedStatus.error_code -ne 'ioexception_80131620') {
+    throw 'Localized updater failure must retain exception type and HRESULT without private message text'
+  }
+  Write-Host 'PASS: localized updater failure retains a stable diagnostic code'
+  $global:LASTEXITCODE = 0
 } finally {
   Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   if (Test-Path $Root) { Remove-Item $Root -Recurse -Force }
