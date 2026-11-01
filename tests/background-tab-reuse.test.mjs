@@ -73,7 +73,7 @@ function fixture(openTabs=[],opts={}) {
 }
 
 for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
-  test(`${action} Chrome call ${hangAt} timeout releases poll for later heartbeat`,async()=>{
+  test(`${action} Chrome call ${hangAt} keeps heartbeat live while busy and releases poll on timeout`,async()=>{
     const reports=[];
     let delivered=false;
     const job={action,id:'read-only-job',chat_url:CHAT};
@@ -89,15 +89,17 @@ for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
     for(let i=0;i<100 && f.calls.injections.length<hangAt;i++) await Promise.resolve();
     assert.equal(f.calls.injections.length,hangAt);
     assert.equal((await f.sandbox.poll()).busy,true);
+    assert.equal(reports.filter(r=>r.type==='heartbeat').length,2,'existing alarm heartbeats during a long read');
+    assert.equal(reports.filter(r=>r.job_id===job.id).length,0,'busy heartbeat cannot flush the interrupted-action placeholder');
     f.fireDeadline();
     const result=await pending;
     assert.equal(result.status,'needs_review');
     assert.match(result.message,/read-only.*timed out/i);
     assert.equal(f.state.pendingReport,null);
     assert.equal(f.deadlines.size,0,'deadline timer cleaned up');
-    assert.equal(reports.filter(r=>r.type==='heartbeat').length,1);
-    assert.equal((await f.sandbox.poll()).idle,true);
     assert.equal(reports.filter(r=>r.type==='heartbeat').length,2);
+    assert.equal((await f.sandbox.poll()).idle,true);
+    assert.equal(reports.filter(r=>r.type==='heartbeat').length,3);
     assert.equal(reports.filter(r=>r.job_id===job.id).length,1);
     f.releaseScript();
     for(let i=0;i<20;i++) await Promise.resolve();
