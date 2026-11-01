@@ -225,7 +225,8 @@ async function closeChat(job,script) {
   let closed=0; const kept=[];
   for(const tab of tabs) {
     let probe=null;
-    try {probe=(await runDriver(script,tab,{action:'probe'}))?.result;} catch {}
+    try {probe=(await runDriver(script,tab,{action:'probe'}))?.result;}
+    catch(err) {kept.push('inspection failed: '+String(err?.message||err).slice(0,350));continue;}
     if(!probe) kept.push('page not ready');
     else if(probe.draft) kept.push('unsent draft');
     else if(probe.answering) kept.push('ChatGPT still answering');
