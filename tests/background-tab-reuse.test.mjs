@@ -413,6 +413,7 @@ test('failed retired-book Chrome inspection does not loop new close jobs through
   const q=new FileQueue(join(dir,'queue.json'),{desktop:'test-'+'x'.repeat(32)});
   await q.initialize();
   const original=await q.enqueue({action:'start',prompt:'Read this book',
+    slack_thread_url:'https://example.slack.com/archives/C0123456789/p1234567890123456',
     book:{books:[{ingestion_id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'}],continuation_prompt:'Continue'}});
   const started=await q.claim('desktop');
   await q.report('desktop',{job_id:started.id,status:'sent',chat_url:CHAT});
