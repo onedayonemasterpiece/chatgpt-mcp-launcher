@@ -406,6 +406,41 @@ test('open-only never reloads or probes the tab',async()=>{
   assert.deepEqual(f.calls.injections,[]);
 });
 
+
+test('failed retired-book Chrome inspection does not loop new close jobs through background poll',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'launcher-retired-close-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const q=new FileQueue(join(dir,'queue.json'),{desktop:'test-'+'x'.repeat(32)});
+  await q.initialize();
+  const original=await q.enqueue({action:'start',prompt:'Read this book',
+    book:{books:[{ingestion_id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'}],continuation_prompt:'Continue'}});
+  const started=await q.claim('desktop');
+  await q.report('desktop',{job_id:started.id,status:'sent',chat_url:CHAT});
+  await q.bookActivity({book_task_id:original.job_id,state:'finalized',next_action:'done'});
+  await q.tick();
+  await q.closeRetiredBookChats();
+  const reports=[];
+  const f=fixture([{id:21,url:CHAT}],{injectionFailure:true,
+    state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>({ok:true,json:async()=>{
+      if(url.endsWith('/device/poll'))return {job:await q.claim('desktop')};
+      const body=JSON.parse(options.body);
+      if(body.job_id){reports.push(body);await q.report('desktop',body);}
+      return {ok:true};
+    }}),
+  });
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  const out=await f.sandbox.poll();
+  assert.equal(out.status,'blocked');
+  assert.match(out.message,/inspection failed: Cannot access contents/);
+  assert.equal(q.status(out.job_id).status,'blocked');
+  assert.deepEqual(f.calls.injections,[21],'one exact-tab read-only probe');
+  assert.equal(f.calls.removed,undefined,'unverified draft or answering state forbids closing');
+  assert.equal(reports.length,1);
+  await q.closeRetiredBookChats();
+  assert.equal(await q.claim('desktop'),null,'same permanently unreadable retired tab must not monopolize Chrome');
+});
+
 test('close-chat closes only idle tabs of that conversation',async()=>{
   const f=fixture([{id:40,url:CHAT},{id:41,url:OTHER}]);
   const result=await f.execute({action:'close',chat_url:CHAT,id:'close-1'});
