@@ -279,9 +279,10 @@ test('page_state from Chrome is reduced to known plain fields',async t=>{
   const a=await q.enqueue({action:'start',prompt:'x'});
   await q.claim('desktop');
   const r=await q.report('desktop',{job_id:a.id,status:'blocked',page_state:{composer:'present',composer_text:'our_prompt',
-    answering:true,connection_lost:true,user_messages:3,assistant_messages:2,url_kind:'conversation',secret_text:'leak'}});
+    answering:true,connection_lost:true,user_messages:3,assistant_messages:2,url_kind:'conversation',secret_text:'leak',
+    document_state:'private text',title_hint:'private title',visible_editors:-1}});
   assert.deepEqual(r.page_state,{url_kind:'conversation',composer:'present',composer_text:'our_prompt',answering:true,
-    connection_lost:true,user_messages:3,assistant_messages:2});
+    connection_lost:true,user_messages:3,assistant_messages:2,document_state:'unknown',title_hint:'unknown',visible_editors:null});
 });
 
 test('continue is refused while the agent in that chat is working or a prompt is on its way',async t=>{

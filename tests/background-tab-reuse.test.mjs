@@ -45,6 +45,11 @@ function fixture(openTabs=[],opts={}) {
       calls.injections.push(params.target.tabId);
       if(opts.enforceHostPermissions && !tabs.get(params.target.tabId)?.url?.startsWith('https://chatgpt.com/'))
         throw Error('Cannot access contents of the page. Extension manifest must request permission to access the respective host.');
+      if(opts.injectionFailure) {
+        if(opts.redirectUrl) tabs.get(params.target.tabId).url=opts.redirectUrl;
+        if(opts.removeOnFailure) tabs.delete(params.target.tabId);
+        throw Error('Cannot access contents of the page');
+      }
       if(calls.injections.length===opts.hangAt) return new Promise(resolve=>{releaseScript=resolve;});
       if(params.files) return [];
       if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,answering:false}}];
@@ -149,6 +154,32 @@ test('book Stop waits for a committed ChatGPT host before injecting through poll
   assert.deepEqual(f.calls.injections,[100,100],'only one Stop observation, no resend');
   assert.equal(reports.filter(r=>r.job_id===job.id).length,1);
   assert.equal(reports.find(r=>r.job_id===job.id).status,'stopped');
+});
+
+test('injection denial reports current tab categories without disclosing redirected URLs or resending',async()=>{
+  for(const [redirectUrl,removeOnFailure,expected] of [
+    ['https://external.example/private?token=secret#private',false,'tab origin=external, status=complete'],
+    [CHAT+'?token=secret#private',false,'tab origin=chatgpt, status=complete'],
+    [null,true,'tab unavailable'],
+  ]) {
+    const reports=[];
+    const job={action:'book_stop',id:'stop-injection-denied',chat_url:CHAT};
+    const f=fixture([{id:21,url:CHAT}],{injectionFailure:true,redirectUrl,removeOnFailure,
+      state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+      fetch:async(url,options)=>({ok:true,json:async()=>{
+        if(url.endsWith('/device/poll')) return {job};
+        reports.push(JSON.parse(options.body));return {ok:true};
+      }}),
+    });
+    f.sandbox.runningVersion=async()=>({update_state:'current'});
+    assert.equal((await f.sandbox.poll()).status,'needs_review');
+    const report=reports.find(r=>r.job_id===job.id);
+    assert.ok(report.message.includes(expected),report.message);
+    assert.match(report.message,/Cannot access contents/);
+    assert.doesNotMatch(report.message,/secret|external\.example|\/private|token=/);
+    assert.deepEqual(f.calls.injections,[21],'one denied injection; no send or retry');
+    assert.deepEqual(f.calls.created,[]);
+  }
 });
 
 test('private book Stop reuses or reopens only its exact conversation without sending a prompt',async()=>{
