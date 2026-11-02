@@ -562,7 +562,8 @@ export class FileQueue {
         chat_url:target,slack_thread_url:args.slack_thread_url||null,
         request_id:requestId||null,status:'queued',created_at:now,
         ...((book||(internalBook&&args.book_task_id))?{book_task_id:book?jobId:args.book_task_id,
-          book_index:book?0:args.book_index,book_activity_at_creation:args.book_activity_at_creation||null}:{}),
+          book_index:book?0:args.book_index,
+          book_accepted_pages_at_creation:args.book_accepted_pages_at_creation??null}:{}),
         ...(action==='reconcile'?{reconcile_of:reviewSource.id}:{}),
         ...(action==='book_stop'?{after_job_id:args.after_job_id}:{}),
         ...(rollOver?{delivery_action:'start',previous_chat_url:target,
@@ -607,7 +608,7 @@ export class FileQueue {
       device_id:original.device_id,slack_thread_url:original.slack_thread_url||undefined,
       ...(original.chat_url?{chat_url:original.chat_url}:{}),
       ...(original.book_task_id?{book_task_id:original.book_task_id,book_index:original.book_index,
-        book_activity_at_creation:original.book_activity_at_creation,
+        book_accepted_pages_at_creation:original.book_accepted_pages_at_creation,
         book_replacement:!!original.handoff_reason,book_stale:original.handoff_reason==='book_silent',
         [BOOK_INTERNAL]:true}:{}),
       request_id:key});
@@ -930,11 +931,15 @@ export class FileQueue {
       const stamp=data.last_operation_at==null?null:safeDate(data.last_operation_at);
       if(data.last_operation_at!=null&&!stamp)throw Error('Invalid RKB last_operation_at');
       const previous=task.activity?.last_operation_at||null;
-      if(stamp&&stamp!==previous&&(!previous||stamp>previous)) {
+      if(Number.isInteger(data.accepted_pages)&&Number.isInteger(task.activity?.accepted_pages)&&
+        data.accepted_pages>task.activity.accepted_pages) {
         task.no_progress_new_chats=0;
         task.no_progress_alert_id=null;
         task.no_progress_notified_id=null;
       }
+      const current=this.#state.jobs.find(j=>j.id===task.job_id);
+      if(current&&current.book_accepted_pages_at_creation==null&&Number.isInteger(data.accepted_pages))
+        current.book_accepted_pages_at_creation=data.accepted_pages;
       task.activity={state,next_action:state==='unavailable'?null:data.next_action,
         last_operation_at:stamp&&(!previous||stamp>previous)?stamp:previous,
         accepted_pages:Number.isInteger(data.accepted_pages)?data.accepted_pages:(task.activity?.accepted_pages??null),
@@ -1069,13 +1074,14 @@ export class FileQueue {
         task.state='blocked';task.terminal_summary='RKB failed/blocker: '+task.books[task.index].ingestion_id;
         changed=true;continue;
       }
-      // Count only confirmed replacement chats; any newer RKB reader operation
+      // Count only confirmed replacement chats; a newly accepted RKB page
       // resets the streak in bookActivity(). No successful start -> no alarm.
       if(job.status==='sent'&&job.result_chat_url&&job.handoff_reason&&!job.book_handoff_counted&&
         job.book_index===task.index) {
         job.book_handoff_counted=true;changed=true;
         if(activity?.state==='staged'&&activity.next_action==='continue_pages'&&
-          activity.last_operation_at===job.book_activity_at_creation) {
+          Number.isInteger(job.book_accepted_pages_at_creation)&&
+          activity.accepted_pages<=job.book_accepted_pages_at_creation) {
           task.no_progress_new_chats=(task.no_progress_new_chats||0)+1;
           if(task.no_progress_new_chats>=2&&!task.no_progress_alert_id)
             task.no_progress_alert_id=randomUUID();
@@ -1087,7 +1093,8 @@ export class FileQueue {
       const complete=this.#bookTurnReleased(job);
       const finished=runnable&&job.status==='sent'&&(MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at)&&
         checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at)&&
-        Date.parse(activity.last_operation_at)>Date.parse(job.book_activity_at_creation||job.created_at);
+        Number.isInteger(job.book_accepted_pages_at_creation)&&
+        activity.accepted_pages>job.book_accepted_pages_at_creation;
       // A finished Stop attempt is not proof the model completed its turn.
       const stale=this.#bookSilent(task,job,now);
       const silent=(stale&&!finished)||
@@ -1119,7 +1126,7 @@ export class FileQueue {
           const next=await this.#enqueue({action:url?'continue':'start',
             ...(url?{chat_url:url}:{}),prompt:bookPrompt(task,task.index),device_id:task.device_id,
             request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
-            book_activity_at_creation:activity?.last_operation_at||null,book_replacement:replacement,
+            book_accepted_pages_at_creation:activity?.accepted_pages??null,book_replacement:replacement,
             book_stale:silent,[BOOK_INTERNAL]:true});
           task.job_id=next.job_id;task.last_enqueue_error=null;
           if(replacement)task.last_replacement_at=new Date(now).toISOString();
