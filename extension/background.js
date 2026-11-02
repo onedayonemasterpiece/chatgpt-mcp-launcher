@@ -130,7 +130,7 @@ async function awaitTab(tabId) {
   // waits for the composer itself. Fail only if the page never arrived.
   for(let i=0;i<450;i++) {
     const tab=await chrome.tabs.get(tabId);
-    if(tab.status==='complete') return;
+    if(tab.status==='complete' && /^https:\/\/chatgpt\.com\//.test(tab.url||'')) return;
     if(i>=150 && /^https:\/\/chatgpt\.com\//.test(tab.url||'')) return;
     await new Promise(r=>setTimeout(r,200));
   }
