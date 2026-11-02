@@ -56,6 +56,8 @@ After a deploy that adds or changes MCP tools of a ChatGPT plugin (for RKB: «Ka
 
 ## Security boundaries
 
+Failed browser jobs retain categorical `page_state` evidence: home/conversation/auth URL kind, document loading state, visible editor count and a standard title hint (`challenge`, `login`, `application_error`, or `other`). The hint is an observation, not a diagnosis or retry permission. Raw titles, URL queries/fragments and page text are not retained in these fields. Older receivers report unknown/null for the added evidence; relay and Chrome updates are both needed to observe it live.
+
 Only the Chrome device endpoints are exposed by the HTTPS proxy. MCP itself remains private. No API keys, passwords or cookies should ever be included in this repository. Source publication is separate from configuring the private relay and server infrastructure.
 
 Run `npm test` to test the relay, extension logic and version reporting; mock tests are not live ChatGPT acceptance.

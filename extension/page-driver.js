@@ -259,8 +259,14 @@
     const text=el ? draftText(el) : '';
     const own=typeof job?.own_text==='string' ? core(job.own_text).slice(0,30) : '';
     const body=(document.body?.innerText||'').slice(-20000);
+    const path=new URL(window.location.href).pathname, title=(document.title||'').trim();
     return {
-      url_kind:isConversationUrl(window.location.href) ? 'conversation' : 'other',
+      url_kind:isConversationUrl(window.location.href) ? 'conversation' : path==='/' ? 'home' :
+        /^\/(?:auth|login|log-in)(?:\/|$)/.test(path) ? 'auth' : 'other',
+      document_state:document.readyState||'unknown',visible_editors:editors.length,
+      title_hint:/^Just a moment[.…]*$/i.test(title) ? 'challenge' :
+        /^(?:Log in|Sign in)(?: - (?:OpenAI|ChatGPT))?$/i.test(title) ? 'login' :
+        /^Application error\b/i.test(title) ? 'application_error' : 'other',
       composer:el ? 'present' : editors.length>1 ? 'ambiguous' : 'missing',
       composer_text:!text.trim() ? 'empty' : own.length>=8 && core(text).includes(own) ? 'our_prompt' : 'other_draft',
       answering:replyInProgress(),

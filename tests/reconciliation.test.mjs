@@ -175,6 +175,40 @@ test('no exact user marker or unfinished assistant answer cannot clear unconfirm
 });
 
 const driver=await readFile(new globalThis.URL('../extension/page-driver.js',import.meta.url),'utf8');
+test('composer failure preserves categorical load evidence through relay without private page data',async t=>{
+  for(const [path,title,ready,kind,hint] of [
+    ['/','private conversation title','loading','home','other'],
+    ['/','Just a moment...','complete','home','challenge'],
+    ['/auth/login','Log in - OpenAI','complete','auth','login'],
+    ['/','Application error: a client-side exception','complete','home','application_error'],
+  ]) {
+    const context={document:{title,readyState:ready,body:{innerText:'private page content'},
+      querySelectorAll:()=>[],execCommand(){throw Error('Must not type');}},
+      window:{location:{href:'https://chatgpt.com'+path+'?private=secret#private'},
+        getComputedStyle:()=>({visibility:'visible',display:'block'})},URL:globalThis.URL,
+      setTimeout:fn=>{queueMicrotask(fn);return 1;}};
+    context.globalThis=context;
+    runInNewContext(driver,context,{timeout:2000});
+    const result=await context.chatGPTLauncherRun({action:'start',prompt:'fixture',effort:'auto'});
+    assert.equal(result.status,'blocked');
+    assert.equal(result.page_state.url_kind,kind);
+    assert.equal(result.page_state.document_state,ready);
+    assert.equal(result.page_state.title_hint,hint);
+    assert.equal(result.page_state.visible_editors,0);
+    const {q}=await setup(t);
+    const job=await q.enqueue({action:'start',prompt:'fixture'});
+    await q.claim('desktop');
+    await q.report('desktop',{job_id:job.id,...result,
+      page_state:{...result.page_state,url:'private URL',title:'private title'}});
+    const saved=q.status(job.id).page_state;
+    assert.equal(saved.url_kind,kind);
+    assert.equal(saved.document_state,ready);
+    assert.equal(saved.title_hint,hint);
+    assert.equal(saved.visible_editors,0);
+    assert.equal(JSON.stringify(saved).includes('private'),false);
+    assert.equal(JSON.stringify(result).includes('private'),false);
+  }
+});
 test('read exposes categorical page state even when conversation messages are unreadable',async()=>{
   for (const banner of ['Connection lost','Соединение прервано','']) {
     const editor={id:'prompt-textarea',innerText:'private unsent draft',isConnected:true,

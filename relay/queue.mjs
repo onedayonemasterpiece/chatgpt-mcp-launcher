@@ -164,7 +164,9 @@ function pageState(raw) {
   if(!raw||typeof raw!=='object') return undefined;
   const pick=(v,allowed)=>allowed.includes(v)?v:'unknown';
   const count=v=>Number.isInteger(v)&&v>=0&&v<100000?v:null;
-  return {url_kind:pick(raw.url_kind,['conversation','other']),composer:pick(raw.composer,['present','missing','ambiguous']),
+  return {url_kind:pick(raw.url_kind,['conversation','home','auth','other']),composer:pick(raw.composer,['present','missing','ambiguous']),
+    document_state:pick(raw.document_state,['loading','interactive','complete']),visible_editors:count(raw.visible_editors),
+    title_hint:pick(raw.title_hint,['challenge','login','application_error','other']),
     composer_text:pick(raw.composer_text,['empty','our_prompt','other_draft']),answering:raw.answering===true,
     connection_lost:raw.connection_lost===true,user_messages:count(raw.user_messages),assistant_messages:count(raw.assistant_messages)};
 }
