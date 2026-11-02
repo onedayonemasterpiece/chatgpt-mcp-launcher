@@ -335,6 +335,62 @@ test('finished turn waits for RKB readiness and then continues same chat even af
   assert.equal(f.q.status(first.job_id).book_task.state,'active');
 });
 
+
+test('cold local-staged books resume after rest; a released Stop allows only one new reader',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const small=await f.start([{ingestion_id:ING1}],'cold-small');
+  const sculptures=await f.start([{ingestion_id:ING2}],'cold-sculptures');
+  await f.deliver(small,CHAT);
+  await f.deliver(sculptures,NEXT);
+  f.advance(1000);
+  const lastOperation=new Date(f.now()).toISOString();
+  await f.activity(small,'staged',lastOperation);
+  await f.q.modelReport({job_id:small.job_id,status:'done'});
+  await f.activity(sculptures,'staged',lastOperation);
+  await f.q.modelReport({job_id:sculptures.job_id,status:'started'});
+
+  f.advance(3*60*60_000+21*60_000);
+  await f.activity(small,'staged',lastOperation);
+  await f.activity(sculptures,'staged',lastOperation);
+  await f.q.tick();
+  const stop=await f.q.claim('desktop');
+  assert.equal(stop?.action,'book_stop');
+  assert.equal(stop.after_job_id,sculptures.job_id);
+  assert.equal(await f.q.claim('desktop'),null,'no concurrent successor before exact Stop');
+  await f.q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:NEXT});
+  await f.q.tick();
+  const restUntil=new Date(f.now()+35*60_000).toISOString();
+  assert.equal(f.q.status(small.job_id).book_task.rest_until,restUntil);
+  assert.equal(f.q.status(sculptures.job_id).book_task.rest_until,restUntil);
+  await f.activity(small,'processing',lastOperation);
+  await f.activity(sculptures,'processing',lastOperation);
+  f.advance(35*60_000);
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'expiry of rest alone does not resume processing/wait');
+
+  await f.activity(small,'staged',lastOperation);
+  await f.q.tick();
+  const continued=await f.q.claim('desktop');
+  assert.equal(continued?.action,'continue','MODEL_DONE resumes the existing chat');
+  assert.equal(continued.chat_url,CHAT);
+  assert.equal(continued.book_task_id,small.job_id);
+  assert.match(continued.own_text,/book_ingest\(status\)/);
+  assert.equal(await f.q.claim('desktop'),null,'other ingestion remains processing/wait');
+
+  await f.activity(sculptures,'staged',lastOperation);
+  await Promise.all([f.q.tick(),f.q.tick()]);
+  const successor=await f.q.claim('desktop');
+  assert.equal(successor?.action,'start','stale released-Stop turn uses a new chat');
+  assert.equal(successor.previous_chat_url,NEXT);
+  assert.equal(successor.book_task_id,sculptures.job_id);
+  assert.match(successor.own_text,/book_ingest\(status\)/);
+  assert.equal(await f.q.claim('desktop'),null,'no second concurrent reader for the same book');
+  const jobs=JSON.parse(await readFile(f.file,'utf8')).jobs;
+  for(const task of [small,sculptures])
+    assert.equal(jobs.filter(j=>j.book_task_id===task.job_id&&['start','continue'].includes(j.action)).length,2);
+  assert.equal(jobs.filter(j=>j.action==='book_stop'&&j.after_job_id===sculptures.job_id).length,1);
+});
+
 test('ordered books: only RKB finalized/done moves to next NEW chat, finally stops',async t=>{
   const f=await fixture(t);
   const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2,telegram_original:'t.me/c/1/2'}]);
