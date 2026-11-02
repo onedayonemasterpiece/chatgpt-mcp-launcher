@@ -963,7 +963,7 @@ export class FileQueue {
             ['start','continue'].includes(j.action)&&!this.#bookTurnReleased(j)))continue;
           const previous=history.findLast(j=>j.action==='close'&&j.book_task_id===task.id&&j.chat_url===url);
           if(previous&&(['queued','claimed','closed'].includes(previous.status)||
-            (previous.status==='blocked'&&previous.message?.includes('unsent draft'))))continue;
+            (previous.status==='blocked'&&/unsent draft|inspection failed/.test(previous.message||''))))continue;
           try {
             await this.#enqueue({action:'close',chat_url:url,device_id:task.device_id,
               request_id:'book-close-'+chatIdFromUrl(url)+'-'+(previous?.id||task.id),
