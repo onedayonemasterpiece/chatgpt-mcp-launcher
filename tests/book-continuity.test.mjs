@@ -35,13 +35,37 @@ async function fixture(t,{random=Math.random}={}) {
     await q.report('desktop',{job_id:claimed.id,status:'sent',chat_url:url});
     return claimed;
   };
-  const activity=async(job,state='staged',last_operation_at=new Date(time).toISOString())=>{
+  const activity=async(job,state='staged',last_operation_at=new Date(time).toISOString(),accepted_pages=14)=>{
     const next_action={staged:'continue_pages',processing:'wait',finalized:'done',failed:'blocker'}[state];
     return q.bookActivity({book_task_id:job.job_id||job.id,state,next_action,last_operation_at,
-      accepted_pages:14,next_cursor:'40'});
+      accepted_pages,next_cursor:'40'});
   };
   return {q,file,now,start,deliver,activity,advance(ms){time+=ms;}};
 }
+
+test('status-only activity is not import progress; accepted pages resume a completed reader',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();
+  await f.deliver(first);
+  await f.activity(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  f.advance(60_000);
+  await f.activity(first); // status ran, but the original page was unavailable: still 14 accepted.
+  await f.q.modelReport({job_id:first.job_id,status:'done',summary:'Page unavailable, no new pages accepted'});
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'a status timestamp must not immediately repeat the failed read');
+  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
+  await restored.initialize();
+  await restored.tick();
+  assert.equal(await restored.claim('desktop'),null,'restart preserves the same progress baseline');
+  f.advance(60_000);
+  await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+    last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
+  await restored.tick();
+  const next=await restored.claim('desktop');
+  assert.equal(next?.action,'continue','a newly accepted page permits ordinary immediate continuation');
+  assert.equal(next.chat_url,CHAT);
+});
 
 test('book title survives queue persistence and appears first in reader prompt and Slack notice; untitled stays unchanged',async t=>{
   const f=await fixture(t);
@@ -78,6 +102,7 @@ test('30-minute active reading creates no browser probes or short tasks; real tu
     await f.q.tick();
     assert.equal(await f.q.claim('desktop'),null,'ongoing RKB reading needs no browser inspection or continuation');
   }
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);
   await f.q.modelReport({job_id:first.job_id,status:'done',summary:'End of a real working turn'});
   await f.q.tick();
   const next=await f.q.claim('desktop');
@@ -157,7 +182,7 @@ for(const restDue of [false,true]) test(`legacy unfinished predecessor blocks ${
     assert.equal(await q.claim('desktop'),null,'released turn without new RKB work waits');
     f.advance(1);
     await q.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
-      last_operation_at:new Date(f.now()).toISOString(),accepted_pages:14,next_cursor:'40'});
+      last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
     await q.tick();
     const next=await q.claim('desktop');
     assert.ok(['start','continue'].includes(next.action));
@@ -316,6 +341,7 @@ test('finished turn waits for RKB readiness and then continues same chat even af
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
   f.advance(1);
   const oldOperation=new Date(f.now()).toISOString();
   await f.activity(first,'processing',oldOperation);
@@ -342,6 +368,8 @@ test('cold local-staged books resume after rest; a released Stop allows only one
   const sculptures=await f.start([{ingestion_id:ING2}],'cold-sculptures');
   await f.deliver(small,CHAT);
   await f.deliver(sculptures,NEXT);
+  await f.activity(small,'staged',new Date(f.now()).toISOString(),13);
+  await f.activity(sculptures,'staged',new Date(f.now()).toISOString(),13);
   f.advance(1000);
   const lastOperation=new Date(f.now()).toISOString();
   await f.activity(small,'staged',lastOperation);
@@ -505,8 +533,11 @@ test('two confirmed replacements without a new RKB operation emit ONE warning, s
   await recovered.initialize();
   assert.equal(recovered.pendingBookNotices().length,0,'receipt survives reboot');
   await f.activity(first,'staged',new Date(f.now()).toISOString());
+  assert.equal(f.q.status(first.job_id).book_task.no_progress_new_chats,2,
+    'status-only activity preserves the no-progress warning');
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);
   assert.equal(f.q.status(first.job_id).book_task.no_progress_new_chats,0,
-    'new RKB operation resets the no-progress streak');
+    'newly accepted page resets the no-progress streak');
 });
 
 test('retry of an unsent silent-book handoff keeps book ownership and automatic continuation',async t=>{
@@ -537,7 +568,7 @@ test('retry of an unsent silent-book handoff keeps book ownership and automatic 
   assert.match(delivered.own_text,new RegExp(ING1));
   await f.q.report('desktop',{job_id:delivered.id,status:'sent',chat_url:NEXT});
   await f.q.modelReport({job_id:delivered.id,status:'done',summary:'Real reader turn complete'});
-  await f.activity(first);
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);
   await f.q.tick();
   const next=await f.q.claim('desktop');
   assert.equal(next.action,'continue');
@@ -550,6 +581,7 @@ test('book progress keeps its chat after 90 minutes; empty turns wait for existi
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
   f.advance(100*60_000);
   await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'done'});
@@ -560,7 +592,7 @@ test('book progress keeps its chat after 90 minutes; empty turns wait for existi
     assert.equal(next.chat_url,CHAT);
     await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:CHAT});
     f.advance(1);
-    await f.activity(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),15+turn);
     await f.q.modelReport({job_id:next.id,status:'done'});
     await f.q.tick();
     next=await f.q.claim('desktop');
@@ -570,12 +602,12 @@ test('book progress keeps its chat after 90 minutes; empty turns wait for existi
   await f.q.report('desktop',{job_id:next.id,status:'sent',chat_url:CHAT});
   const lastOperation=new Date(f.now()).toISOString();
   f.advance(2*60_000);
-  await f.activity(first,'staged',lastOperation); // Fresh status, no new operation.
+  await f.activity(first,'staged',lastOperation,21); // Fresh status, no new operation.
   await f.q.modelReport({job_id:next.id,status:'done'});
   await f.q.tick();
   assert.equal(await f.q.claim('desktop'),null,'no immediate empty continuation loop');
   f.advance(19*60_000);
-  await f.activity(first,'staged',lastOperation);
+  await f.activity(first,'staged',lastOperation,21);
   await f.q.tick();
   const replacement=await f.q.claim('desktop');
   assert.equal(replacement.action,'start');
@@ -730,6 +762,7 @@ test('cached-schema safety refusal stops a sent successor, including after resta
     const f=await fixture(t);
     const first=await f.start();
     await f.deliver(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
     f.advance(1);
     await f.activity(first);
     await f.q.modelReport({job_id:first.job_id,status:'done'});
@@ -777,6 +810,7 @@ test('explicit client safety rejection stops only this book after queued continu
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
   f.advance(1);
   const oldOperation=new Date(f.now()).toISOString();
   await f.activity(first,'staged',oldOperation); // A prior read arrived; the rejected stage did not.
@@ -798,6 +832,7 @@ test('explicit client safety rejection stops only this book after queued continu
   assert.equal(f.q.pendingBookNotices()[0].kind,'terminal');
 
   await f.deliver(other,NEXT);
+  await f.activity(other,'staged',new Date(f.now()).toISOString(),13);
   f.advance(1);
   await f.activity(other);
   await f.q.modelReport({job_id:other.job_id,status:'done',summary:'Normal turn completion'});
@@ -831,6 +866,7 @@ test('generic model blocked/done are only turn outcomes; narrow failure_kind is 
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
   f.advance(1);
   await f.activity(first);
   await assert.rejects(f.q.modelReport({job_id:first.job_id,status:'done',
@@ -876,6 +912,8 @@ test('3h expires queued books, DEV runs, restart preserves rest and resumes each
   const reader=await f.start([{ingestion_id:ING3}],'rest-reader');
   await f.deliver(worker,CHAT);
   await f.deliver(reader,NEXT);
+  await f.activity(worker,'staged',new Date(f.now()).toISOString(),13);
+  await f.activity(reader,'staged',new Date(f.now()).toISOString(),13);
   await f.q.modelReport({job_id:worker.job_id,status:'started'});
   await f.q.modelReport({job_id:reader.job_id,status:'done'});
   f.advance(3*60*60_000-60_000);
