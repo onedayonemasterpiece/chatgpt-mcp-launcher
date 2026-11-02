@@ -196,14 +196,24 @@ function driverScript() {
 }
 async function runDriver(script,tab,payload) {
   const invoke=async()=>{
-    await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
-    const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
-      func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
-        payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
-        payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
-        payload.action==='book_stop' ? globalThis.chatGPTLauncherStopBook(payload) :
-        globalThis.chatGPTLauncherRun(payload),args:[payload]});
-    return result;
+    try {
+      await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
+      const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},
+        func:async payload=>payload.action==='probe' ? globalThis.chatGPTLauncherProbe() :
+          payload.action==='read' ? globalThis.chatGPTLauncherRead(payload) :
+          payload.action==='reconcile' ? globalThis.chatGPTLauncherReconcile(payload) :
+          payload.action==='book_stop' ? globalThis.chatGPTLauncherStopBook(payload) :
+          globalThis.chatGPTLauncherRun(payload),args:[payload]});
+      return result;
+    } catch(error) {
+      let context='tab unavailable';
+      try {
+        const current=await chrome.tabs.get(tab.id),url=new URL(current.url);
+        const origin=url.origin==='https://chatgpt.com'?'chatgpt':'external';
+        context=`tab origin=${origin}, status=${['loading','complete'].includes(current.status)?current.status:'unknown'}`;
+      } catch { /* Preserve the original error if the tab disappeared. */ }
+      throw new Error(`${error.message}; ${context}`);
+    }
   };
   if(!['read','reconcile','probe','book_stop'].includes(payload.action)) return invoke();
   // Composer (90s) + history (60s) + settling (1s), with Chrome API headroom.
