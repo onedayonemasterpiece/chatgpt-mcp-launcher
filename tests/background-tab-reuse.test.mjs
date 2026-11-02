@@ -29,6 +29,7 @@ function fixture(openTabs=[],opts={}) {
       remove:async id=>{calls.removed=(calls.removed||[]).concat(id);tabs.delete(id);},
       get:async(id)=>{
         const tab=tabs.get(id);
+        if(opts.tabUrls?.length) tab.url=opts.tabUrls.shift();
         if(opts.slowLoadReads && reads++ < opts.slowLoadReads) return {...tab,status:'loading',...(opts.loadingUrl!==undefined?{url:opts.loadingUrl}:{})};
         return {...tab,status:'complete'};
       },
@@ -42,6 +43,8 @@ function fixture(openTabs=[],opts={}) {
     windows:{update:async(id,params)=>calls.windows.push({id,...params})},
     scripting:{executeScript:async(params)=>{
       calls.injections.push(params.target.tabId);
+      if(opts.enforceHostPermissions && !tabs.get(params.target.tabId)?.url?.startsWith('https://chatgpt.com/'))
+        throw Error('Cannot access contents of the page. Extension manifest must request permission to access the respective host.');
       if(calls.injections.length===opts.hangAt) return new Promise(resolve=>{releaseScript=resolve;});
       if(params.files) return [];
       if(params.args[0].action==='probe') return [{result:opts.probe||{draft:false,answering:false}}];
@@ -124,6 +127,29 @@ test('probe deadline bounds inspection while start/continue stay outside it',asy
   }
 });
 
+
+
+test('book Stop waits for a committed ChatGPT host before injecting through poll and reporting',async()=>{
+  const job={action:'book_stop',id:'book-stop-committed-host',
+    chat_url:CHAT,after_job_id:'6ed884fe-1026-4728-2017-d6c47282017a'};
+  const reports=[];
+  let delivered=false;
+  const f=fixture([],{tabUrls:['about:blank',CHAT],enforceHostPermissions:true,
+    driverResults:[{status:'stopped',chat_url:CHAT,message:'Exact book turn stopped in ChatGPT UI'}],
+    state:{config:{url:'https://relay.example',token:'x'.repeat(32),deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>({ok:true,json:async()=>{
+      if(url.endsWith('/device/poll')){const next=delivered?null:job;delivered=true;return {job:next};}
+      reports.push(JSON.parse(options.body));return {ok:true};
+    }}),
+  });
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  const result=await f.sandbox.poll();
+  assert.equal(result.status,'stopped','never inject into a transient off-host document');
+  assert.deepEqual(f.calls.created.map(t=>t.url),[CHAT]);
+  assert.deepEqual(f.calls.injections,[100,100],'only one Stop observation, no resend');
+  assert.equal(reports.filter(r=>r.job_id===job.id).length,1);
+  assert.equal(reports.find(r=>r.job_id===job.id).status,'stopped');
+});
 
 test('private book Stop reuses or reopens only its exact conversation without sending a prompt',async()=>{
   const id='6ed884fe-1026-4728-2017-d6c47282017a';
