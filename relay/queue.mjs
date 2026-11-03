@@ -84,27 +84,19 @@ export function callbackFooter(jobId) {
     'сразу вызови chatgpt_report приложения '+APP_NAME+' с job_id='+jobId+
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
-const BOOK_FOOTER = ' Импортируй книгу одним длительным рабочим ходом, обычно 30–90 минут, пока есть работа и инструменты доступны. '+
-  'Страница и пакет сохранения — не отдельное задание и не повод закончить ответ. '+
-  'Не завершай ход после каждой страницы, пакета или обычного processing/wait; дождись результата и продолжай чтение. '+
-  'При processing/wait проверяй status не чаще раза в 30–60 секунд; после пяти wait закончи ход с status=done, продолжение обеспечит Launcher. '+
-  'Не создавай себе короткий таймер остановки. Если ход действительно заканчивается, сообщи status=done только за этот ход. '+
-  'Порядок импорта и завершения бери из инструкций MCP RKB. '+
-  'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
-  'Не публикуй каждый ход в Slack: итог отправляет Launcher. '+
-  'Если OpenAI явно отклонил book_ingest(status или stage) клиентской проверкой безопасности, '+
-  'вызови chatgpt_report(status=blocked, failure_kind=client_safety_rejection, '+
-  'summary=точный текст отказа); если в схеме нет failure_kind, начни summary с '+
-  '"failure_kind=client_safety_rejection. " перед точным отказом; не повторяй вызов через другой чат.';
-const bookFooter=deadline=>BOOK_FOOTER+' Рабочий период до '+new Date(deadline).toISOString()+
-  ': у границы не начинай новый пакет, а текущий ответ и сохранение спокойно заверши, даже после срока; '+
-  'Launcher сам возобновит книгу после отдыха.';
+// Import rules live in the RKB MCP instructions; this adds only what MCP cannot know.
+// No deadline: after BOOK_WORK_MS the relay stops issuing turns and lets issued ones finish.
+const BOOK_FOOTER = ' Импортируй книгу по инструкциям MCP RKB одним длительным ходом: страница, пакет '+
+  'и processing/wait — не повод закончить ответ. При processing/wait проверяй status не чаще раза в 30–60 секунд; '+
+  'после пяти wait подряд закончи ход с status=done, продолжение обеспечит Launcher. '+
+  'Если OpenAI явно отклонил вызов book_ingest клиентской проверкой безопасности, вызови '+
+  'chatgpt_report(status=blocked, failure_kind=client_safety_rejection, summary=точный текст отказа; '+
+  'без поля failure_kind начни summary с "failure_kind=client_safety_rejection. "). Ходы в Slack не публикуй.';
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
   return '(Книга '+(index+1)+' из '+task.books.length+': '+(selector.title?'«'+selector.title+'», ':'')+'ingestion_id='+selector.ingestion_id+
     (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
-    '. Сначала book_ingest(status) по этому ingestion_id; это не предыдущая книга. '+
-    'Принятые страницы не повторяй.)\n\n'+task.continuation_prompt;
+    '. Сначала book_ingest(status) по этому ingestion_id.)\n\n'+task.continuation_prompt;
 };
 
 // One plain instruction per state, so a calling agent always knows what to do next.
@@ -537,7 +529,7 @@ export class FileQueue {
       // Reject before queue admission: this exact payload is what Chrome's
       // preparePrompt validates, including the callback footer added at claim.
       if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
-        ((book||(internalBook&&args.book_task_id))?bookFooter(0).length:0)>MAX_PROMPT)
+        ((book||(internalBook&&args.book_task_id))?BOOK_FOOTER.length:0)>MAX_PROMPT)
         throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
       if(this.#state.jobs.length>=MAX_JOBS) {
         // Never evict an ambiguous send: losing that receipt could authorize a
@@ -1245,8 +1237,7 @@ export class FileQueue {
       return {...job,action:job.delivery_action||job.action,
         ...(job.book_task_id?{slack_thread_url:null}:{}), // Book completion is posted once by relay, not by each ChatGPT turn.
         chat_url:job.delivery_action==='start'?null:job.chat_url,
-        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?
-          bookFooter((this.#state.book_cycles[deviceId]?.started_at||now)+BOOK_WORK_MS):''):job.prompt,
+        request_id:undefined,prompt:sends?effectivePrompt+callbackFooter(job.id)+(job.book_task_id?BOOK_FOOTER:''):job.prompt,
         mention:sends?APP_NAME:undefined,
         own_text:sends?effectivePrompt:undefined,
         ...(job.action==='reconcile'?{verify_job_id:job.reconcile_of}:{} )}; // Browser sees one new-chat send, never the old tab
