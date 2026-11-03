@@ -382,7 +382,7 @@ test('two concurrent book tasks on distinct ingestions remain independent',async
   assert.deepEqual(f.q.activeBooks(),[{book_task_id:second.job_id,ingestion_id:ING2}]);
 });
 
-test('RKB failed/blocker stops list; processing/wait never means stale',async t=>{
+test('RKB failed/blocker completes a one-book list with error; processing/wait never means stale',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
@@ -392,8 +392,8 @@ test('RKB failed/blocker stops list; processing/wait never means stale',async t=
   assert.equal(await f.q.claim('desktop'),null,'RKB processing creates no short browser tasks');
   await f.activity(first,'failed');
   await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.state,'blocked');
-  assert.equal(f.q.pendingBookNotices()[0].kind,'terminal');
+  assert.equal(f.q.status(first.job_id).book_task.state,'failed');
+  assert.equal(f.q.pendingBookNotices()[0].kind,'book_failure');
 });
 
 test('loopback RKB GET sends dedicated principal, credential UUID and epoch; exact contract',async t=>{
@@ -521,8 +521,9 @@ test('cached-schema safety refusal stops a sent successor, including after resta
     } else {
       await q.modelReport({job_id:first.job_id,status:'blocked',summary:refusal});
     }
-    assert.equal(q.status(first.job_id).book_task.state,'blocked',persisted?'stored report':'cached schema');
-    assert.match(q.status(first.job_id).book_task.terminal_summary,/OpenAI client safety rejection/);
+    await q.tick();
+    assert.equal(q.status(first.job_id).book_task.state,'failed',persisted?'stored report':'cached schema');
+    assert.match(q.status(first.job_id).book_task.terminal_summary,/client_safety_rejection/);
     const stop=await q.claim('desktop');
     assert.equal(stop?.action,'book_stop','sent successor needs the existing exact Stop');
     assert.equal(stop.after_job_id,sent.id);
@@ -539,7 +540,7 @@ test('cached-schema safety refusal stops a sent successor, including after resta
       .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action));
     assert.equal(later.length,prior,'no future book sends after reload');
     assert.equal(await reloaded.claim('desktop'),null);
-    assert.equal(reloaded.pendingBookNotices().length,1,'one book-specific terminal notice');
+    assert.equal(reloaded.pendingBookNotices().length,2,'one book error and one list completion notice');
   }
 });
 
@@ -562,11 +563,12 @@ test('explicit client safety rejection stops only this book after queued continu
   const report={job_id:first.job_id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal};
   await f.q.modelReport(report);
   await f.q.modelReport(report); // Duplicate callback must not create a second notice.
-  assert.equal(f.q.status(first.job_id).book_task.state,'blocked');
-  assert.equal(f.q.status(first.job_id).book_task.terminal_summary,'OpenAI client safety rejection: '+refusal);
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.state,'failed');
+  assert.ok(f.q.status(first.job_id).book_task.terminal_summary.endsWith(refusal));
   assert.equal(f.q.status(queuedId).status,'expired','queued successor was never sent');
-  assert.equal(f.q.pendingBookNotices().length,1);
-  assert.equal(f.q.pendingBookNotices()[0].kind,'terminal');
+  assert.equal(f.q.pendingBookNotices().length,2);
+  assert.equal(f.q.pendingBookNotices()[0].kind,'book_failure');
 
   await f.deliver(other,NEXT);
   await f.activity(other,'staged',new Date(f.now()).toISOString(),13);
@@ -592,8 +594,8 @@ test('explicit client safety rejection stops only this book after queued continu
   assert.equal(laterJobs.length,initialJobs,'no new sends, rollover or retry after stale RKB and restart');
   assert.ok(!laterJobs.some(j=>j.status==='queued'||j.status==='claimed'));
   assert.deepEqual(reloaded.activeBooks(),[{book_task_id:other.job_id,ingestion_id:ING2}]);
-  assert.equal(reloaded.pendingBookNotices().length,1);
-  await reloaded.bookNoticeSent(first.job_id,first.job_id);
+  assert.equal(reloaded.pendingBookNotices().length,2);
+  for(const notice of reloaded.pendingBookNotices())await reloaded.bookNoticeSent(first.job_id,notice.notice_id);
   assert.equal(reloaded.pendingBookNotices().length,0,'exactly one terminal notice');
   await reloaded.tick();
   assert.equal(reloaded.pendingBookNotices().length,0);
@@ -820,4 +822,38 @@ test('recent activity and pending RKB save never create a replacement or browser
     await f.activity(first,state,operation);await f.q.tick();
     assert.equal(await f.q.claim('desktop'),null);
   }
+});
+
+
+test('a rejected book reports once and advances independent books without operator state',async t=>{
+  for(const safety of [false,true]) {
+    const f=await fixture(t);const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);await f.deliver(first);
+    await f.activity(first);
+    if(safety)await f.q.modelReport({job_id:first.job_id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Explicit platform rejection'});
+    else await f.activity(first,'failed');
+    await f.q.tick();
+    assert.equal(f.q.status(first.job_id).book_task.state,'active');
+    assert.equal(f.q.status(first.job_id).book_task.current_book_index,1);
+    const next=await f.q.claim('desktop');assert.equal(next?.action,'start');assert.equal(next.book_index,1);
+    assert.doesNotMatch(next.own_text,new RegExp(ING1));
+    const issues=f.q.pendingBookNotices().filter(n=>n.kind==='book_failure');assert.equal(issues.length,1);
+    assert.equal(issues[0].ingestion_id,ING1);assert.match(bookNoticeText(issues[0]),/BOOK_FAILURE/);
+    await f.q.bookNoticeSent(first.job_id,issues[0].notice_id);
+    const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
+    assert.equal(restored.pendingBookNotices().filter(n=>n.kind==='book_failure').length,0);
+    await restored.report('desktop',{job_id:next.id,status:'sent',chat_url:NEXT});
+    await restored.bookActivity({book_task_id:first.job_id,state:'finalized',next_action:'done'});await restored.tick();
+    assert.equal(restored.status(first.job_id).book_task.state,'failed','a failed book is never labelled imported');
+  }
+});
+
+
+test('legacy blocked book tasks become terminal errors without sending requests',async t=>{
+  const f=await fixture(t);const first=await f.start();await f.deliver(first);
+  const state=JSON.parse(await readFile(f.file,'utf8'));state.book_tasks[0].state='blocked';
+  state.book_tasks[0].terminal_summary='Original failure retained';await writeFile(f.file,JSON.stringify(state));
+  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();await restored.tick();
+  assert.equal(restored.status(first.job_id).book_task.state,'failed');
+  assert.equal(restored.status(first.job_id).book_task.terminal_summary,'Original failure retained');
+  assert.equal(await restored.claim('desktop'),null);
 });
