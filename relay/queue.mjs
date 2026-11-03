@@ -368,6 +368,7 @@ export class FileQueue {
         book_cycles:parsed.book_cycles||{}};
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
+      for(const task of this.#state.book_tasks)if(task.state==='blocked')task.state='failed';
       // Earlier releases left such jobs as needs_review; they certainly sent nothing.
       for(const job of this.#state.jobs) if(job.status==='needs_review'&&job.page_state?.composer_text==='our_prompt'&&!job.model_status) {
         job.status='blocked';
@@ -992,18 +993,24 @@ export class FileQueue {
     return this.#state.book_tasks.flatMap(t=>{
       const shared={...this.#bookPublic(t),title:t.books[t.index].title,slack_thread_url:t.slack_thread_url};
       if(!t.slack_thread_url)return [];
+      const failures=this.#state.jobs.filter(j=>j.book_task_id===t.id&&j.book_failure_reason&&!j.book_notice_sent_at)
+        .map(j=>({...shared,kind:'book_failure',notice_id:'book-failure-'+j.id,
+          title:t.books[j.book_index].title,ingestion_id:t.books[j.book_index].ingestion_id,
+          current_book_index:j.book_index,terminal_summary:j.book_failure_reason+': '+(j.model_summary||'RKB failed').slice(0,500)}));
       if(t.state!=='active'&&!t.notice_sent_at)
-        return [{...shared,kind:'terminal',notice_id:t.id}];
+        return [...failures,{...shared,kind:'terminal',notice_id:t.id}];
       if(t.state==='active'&&t.no_progress_alert_id&&t.no_progress_notified_id!==t.no_progress_alert_id)
-        return [{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
-      return [];
+        return [...failures,{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
+      return failures;
     });
   }
   async bookNoticeSent(id,noticeId) {
     return this.#run(async()=>{
       const task=this.#state.book_tasks.find(t=>t.id===id);
       if(!task)throw Error('Unknown book task');
-      if(task.state!=='active'&&noticeId===task.id)
+      const failed=this.#state.jobs.find(j=>'book-failure-'+j.id===noticeId&&j.book_task_id===id&&j.book_failure_reason);
+      if(failed)failed.book_notice_sent_at||=new Date(this.now()).toISOString();
+      else if(task.state!=='active'&&noticeId===task.id)
         task.notice_sent_at||=new Date(this.now()).toISOString();
       else if(task.state==='active'&&noticeId===task.no_progress_alert_id)
         task.no_progress_notified_id=noticeId;
@@ -1011,9 +1018,12 @@ export class FileQueue {
       await this.#save();
     });
   }
-  async #stopBookOnSafety(task,source,summary,now) {
-    task.state='blocked';
-    task.terminal_summary='OpenAI client safety rejection: '+summary;
+  async #recordBookSafetyFailure(task,source,summary,now) {
+    if(source.book_failure_reason)return;
+    source.book_failure_reason='client_safety_rejection';
+    task.terminal_summary=(task.terminal_summary||'')+'\n'+task.books[task.index].ingestion_id+': '+summary.slice(0,500);
+    console.log(JSON.stringify({event:'book_failure',book_task_id:task.id,job_id:source.id,
+      ingestion_id:task.books[task.index].ingestion_id,reason:source.book_failure_reason}));
     const following=this.#state.jobs.slice(this.#state.jobs.indexOf(source)+1)
       .filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
         ['start','continue'].includes(j.action));
@@ -1040,19 +1050,27 @@ export class FileQueue {
       if(!job)continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
       const refusal=jobs.find(j=>j.book_index===task.index&&j.model_status==='blocked'&&
-        clientSafetyMarker(j.model_summary));
+        (clientSafetyMarker(j.model_summary)||j.book_failure_reason==='client_safety_rejection'));
       if(refusal) {
-        await this.#stopBookOnSafety(task,refusal,refusal.model_summary,now);
-        changed=true;continue;
+        await this.#recordBookSafetyFailure(task,refusal,refusal.model_summary,now);
+        changed=true;
       }
       const activity=task.activity;
-      // A completed/failed book is determined ONLY by RKB, never by ChatGPT.
-      if(activity?.state==='finalized'&&activity.next_action==='done') {
+      const failed=activity?.state==='failed'&&activity.next_action==='blocker';
+      if(failed&&!job.book_failure_reason) {
+        job.book_failure_reason='rkb_failed';
+        task.terminal_summary=(task.terminal_summary||'')+'\n'+task.books[task.index].ingestion_id+': RKB failed';
+        console.log(JSON.stringify({event:'book_failure',book_task_id:task.id,job_id:job.id,
+          ingestion_id:task.books[task.index].ingestion_id,reason:job.book_failure_reason}));
+      }
+      // RKB determines completion; explicit failures end this attempt, not the list.
+      if(activity?.state==='finalized'&&activity.next_action==='done'||refusal||failed) {
         if(job.status==='queued') {
           job.status='expired';job.message='Previous book already finalized in RKB';
         }
         if(task.index===task.books.length-1) {
-          task.state='done';task.terminal_summary='All '+task.books.length+' books finalized in RKB';
+          task.state=task.terminal_summary?'failed':'done';
+          task.terminal_summary||='All '+task.books.length+' books finalized in RKB';
         } else {
           if(this.#bookPaused(task.device_id,now))continue;
           const nextIndex=task.index+1;
@@ -1066,11 +1084,6 @@ export class FileQueue {
             task.last_enqueue_error=null;
           } catch(err){task.last_enqueue_error=err.message;}
         }
-        changed=true;continue;
-      }
-      if(activity?.state==='failed'&&activity.next_action==='blocker') {
-        if(job.status==='queued'){job.status='expired';job.message='RKB reported blocker';}
-        task.state='blocked';task.terminal_summary='RKB failed/blocker: '+task.books[task.index].ingestion_id;
         changed=true;continue;
       }
       // Count only confirmed replacement chats; a newly accepted RKB page
@@ -1150,7 +1163,7 @@ export class FileQueue {
         (data.status==='blocked'&&clientSafetyMarker(data.summary))) {
         const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
           t.state==='active'&&t.index===job.book_index);
-        if(task) await this.#stopBookOnSafety(task,job,data.summary,this.now());
+        if(task) await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
@@ -1209,9 +1222,9 @@ export class FileQueue {
         if(candidate.action==='book_stop') {
           const task=this.#state.book_tasks.find(t=>t.id===candidate.book_task_id);
           const source=this.#state.jobs.find(j=>j.id===candidate.after_job_id);
-          const safety=task?.state==='blocked'&&
-            task.terminal_summary?.startsWith('OpenAI client safety rejection: ')&&
-            source?.id===task.job_id&&source.status==='sent';
+          const safety=source?.status==='sent'&&this.#state.jobs.some(j=>
+            j.book_task_id===task?.id&&j.book_index===source.book_index&&
+            j.book_failure_reason==='client_safety_rejection');
           if(!source||!(safety||(task?.state==='active'&&this.#bookSilent(task,source,now)&&
             !MODEL_FINAL.includes(source.model_status)&&!source.page_completed_at))) {
             candidate.status='expired';candidate.message='Book Stop no longer applicable';changed=true;continue;

@@ -172,13 +172,13 @@ export function bookActivityReaderFromEnv() {
   };
 }
 export function bookNoticeText(task) {
-  const message=task.kind==='no_progress'?
+  const message=task.kind==='book_failure'?'Книга завершилась ошибкой; остальные книги продолжаются':task.kind==='no_progress'?
     'Два новых окна подряд без новых операций RKB; задача остаётся активной':
-    task.state==='done'?'Список книг дочитан':'Импорт остановлен';
+    task.state==='done'?'Список книг дочитан':'Список завершён с ошибками';
   const position=(task.current_book_index+1)+'/'+task.total_books;
   const bookAndId=task.title?'book=«'+task.title+'» '+position+'; ingestion_id='+task.ingestion_id:
     'ingestion_id='+task.ingestion_id+'; book='+position;
-  return '[Launcher book-task / '+(task.kind==='no_progress'?'NO_PROGRESS':task.state.toUpperCase())+'] '+message+
+  return '[Launcher book-task / '+(task.kind==='book_failure'?'BOOK_FAILURE':task.kind==='no_progress'?'NO_PROGRESS':task.state.toUpperCase())+'] '+message+
     '; '+bookAndId+
     '; last_operation_at='+(task.last_operation_at||'null')+
     '; accepted_pages='+(task.accepted_pages??'unknown')+
