@@ -257,6 +257,7 @@ export class FileQueue {
           if(task.state!=='active'||task.device_id!==deviceId)return false;
           const job=this.#state.jobs.find(j=>j.id===task.job_id);
           if(!job)return true; // missing current turn cannot prove termination
+          if(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))return false;
           if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
           return this.#unfinishedBookTurns(task).length>0;
         });

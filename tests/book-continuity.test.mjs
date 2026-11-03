@@ -874,3 +874,20 @@ test('an undelivered initial reader with zero RKB operations recovers without an
     await f.q.tick();assert.equal(await f.q.claim('desktop'),null);
   }
 });
+
+test('finalized book does not let an unconfirmed predecessor block device rest',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}],'rest-finalized-predecessor');
+  await f.deliver(first);await f.q.modelReport({job_id:first.job_id,status:'started'});
+  const old=new Date(f.now()).toISOString();f.advance(21*60_000);
+  await f.activity(first,'staged',old);await f.q.tick();
+  const successor=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:successor.id,status:'sent',chat_url:NEXT});
+  await f.q.modelReport({job_id:successor.id,status:'done'});
+  f.advance(3*60*60_000);
+  await f.activity(first,'finalized');await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
+  assert.equal(await f.q.claim('desktop'),null,'next book respects the full rest');
+  f.advance(35*60_000);await f.q.tick();
+  const next=await f.q.claim('desktop');assert.equal(next.action,'start');assert.match(next.own_text,new RegExp(ING2));
+});
