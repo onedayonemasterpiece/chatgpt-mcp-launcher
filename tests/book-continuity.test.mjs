@@ -857,3 +857,17 @@ test('legacy blocked book tasks become terminal errors without sending requests'
   assert.equal(restored.status(first.job_id).book_task.terminal_summary,'Original failure retained');
   assert.equal(await restored.claim('desktop'),null);
 });
+
+
+test('an undelivered initial reader with zero RKB operations recovers without an operator',async t=>{
+  for(const uncertain of [false,true]) {
+    const f=await fixture(t);const first=await f.start();
+    if(uncertain){const claimed=await f.q.claim('desktop');await f.q.report('desktop',{job_id:claimed.id,status:'needs_review',message:'Browser delivery outcome unavailable'});}
+    f.advance(21*60_000);
+    await f.q.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',last_operation_at:null,accepted_pages:0,next_cursor:'0'});
+    await f.q.tick();const next=await f.q.claim('desktop');
+    assert.equal(next?.action,'start');assert.notEqual(next.id,first.job_id);
+    assert.equal(next.book_task_id,first.job_id);assert.match(next.own_text,new RegExp(ING1));
+    await f.q.tick();assert.equal(await f.q.claim('desktop'),null);
+  }
+});
