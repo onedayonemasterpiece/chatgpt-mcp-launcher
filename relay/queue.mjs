@@ -85,6 +85,7 @@ export function callbackFooter(jobId) {
 const BOOK_FOOTER = ' Импортируй книгу одним длительным рабочим ходом, обычно 30–90 минут, пока есть работа и инструменты доступны. '+
   'Страница и пакет сохранения — не отдельное задание и не повод закончить ответ. '+
   'Не завершай ход после каждой страницы, пакета или обычного processing/wait; дождись результата и продолжай чтение. '+
+  'При processing/wait проверяй status не чаще раза в 30–60 секунд; после пяти wait закончи ход с status=done, продолжение обеспечит Launcher. '+
   'Не создавай себе короткий таймер остановки. Если ход действительно заканчивается, сообщи status=done только за этот ход. '+
   'Порядок импорта и завершения бери из инструкций MCP RKB. '+
   'Новый чат начинает с book_ingest(status), принятые страницы не повторяй. '+
@@ -221,12 +222,10 @@ export class FileQueue {
     return !!cycle && (cycle.resume_at>now ||
       (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
   }
-  #bookStopFinished(job) {
-    return this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===job.id&&
-      ['stopped','read','blocked','needs_review','failed','expired'].includes(j.status));
-  }
   #bookTurnReleased(job) {
-    return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||this.#bookStopFinished(job);
+    const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id);
+    return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||
+      !!task&&this.#bookSilent(task,job,this.now());
   }
   #unfinishedBookTurns(task) {
     return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
@@ -1090,30 +1089,14 @@ export class FileQueue {
       if(['queued','claimed'].includes(job.status))continue;
       const checked=Date.parse(activity?.checked_at||'');
       const runnable=activity?.state==='staged'&&activity.next_action==='continue_pages'&&now-checked<=7*60_000;
-      const complete=this.#bookTurnReleased(job);
       const finished=runnable&&job.status==='sent'&&(MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at)&&
         checked>=Date.parse(job.model_finished_at||job.page_completed_at||job.created_at)&&
         Number.isInteger(job.book_accepted_pages_at_creation)&&
         activity.accepted_pages>job.book_accepted_pages_at_creation;
-      // A finished Stop attempt is not proof the model completed its turn.
       const stale=this.#bookSilent(task,job,now);
       const silent=(stale&&!finished)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
-      const predecessor=this.#unfinishedBookTurns(task).find(j=>j.id!==job.id);
-      const writer=predecessor||job, stopUrl=writer.result_chat_url||writer.chat_url;
-      if(predecessor||stale&&!complete&&['sent','needs_review'].includes(job.status)) {
-        if(stopUrl&&this.#bookSilent(task,writer,now)&&
-            !this.#state.jobs.some(j=>j.action==='book_stop'&&j.after_job_id===writer.id)) {
-          try {
-            await this.#enqueue({action:'book_stop',chat_url:stopUrl,device_id:task.device_id,
-              after_job_id:writer.id,book_task_id:task.id,book_index:task.index,
-              request_id:'book-stop-'+writer.id,[BOOK_INTERNAL]:true});
-            changed=true;
-          } catch(err){task.last_enqueue_error=err.message;changed=true;}
-        }
-        continue;
-      }
       if(this.#bookPaused(task.device_id,now))continue;
       if(silent||finished) {
         if(!url&&!silent)continue;
