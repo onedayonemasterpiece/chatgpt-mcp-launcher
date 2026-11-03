@@ -24,10 +24,12 @@ const clientSafetyMarker=s=>typeof s==='string'&&
 const continuationCount = value => Number.isInteger(value) && value>=0 && value<=MAX_CONTINUATIONS ? value : null;
 const promptDigest = prompt => createHash('sha256').update(prompt||'').digest('hex');
 function handoffPrefix(url, sourcePrompt, nextPrompt, jobId, internalBook=false) {
+  // Book continuations already contain their full current instructions.
+  if(internalBook)return '';
   // Chrome validates the FINAL payload, after claim() adds callbackFooter.
   const budget=MAX_PROMPT-callbackFooter(jobId).length;
   const intro='(Продолжение работы из чата '+url+'. Launcher открыл НОВОЕ окно вместо дальнейшего продолжения старого. '+
-    (internalBook?'':'Используй предыдущий чат как контекст; ')+
+    'Используй предыдущий чат как контекст; '+
     'не запускай второй параллельный экземпляр задания.)\n\n';
   const suffix='Текущее поручение (выполни его без потери деталей):\n';
   if(intro.length+suffix.length+nextPrompt.length>budget) {

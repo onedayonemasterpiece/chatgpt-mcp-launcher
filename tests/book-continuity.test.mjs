@@ -132,6 +132,9 @@ test('20 minutes only with staged/continue_pages and RKB last_operation_at: one 
   assert.equal(replacement.previous_chat_url,CHAT);
   assert.equal(replacement.handoff_reason,'book_silent');
   assert.doesNotMatch(replacement.own_text,/Используй предыдущий чат как контекст/);
+  assert.doesNotMatch(replacement.own_text,/Продолжение работы из чата|Исходный prompt предыдущего чата/);
+  assert.ok(!replacement.own_text.includes(CHAT),'the book driver owns handoff; reader must not inspect the predecessor');
+  assert.ok(replacement.own_text.includes(CONTINUE),'complete current book instructions remain');
   assert.equal(replacement.slack_thread_url,null);
   await f.q.tick();
   assert.equal(await f.q.claim('desktop'),null);
