@@ -87,8 +87,7 @@ export function callbackFooter(jobId) {
 // Import rules live in the RKB MCP instructions; this adds only what MCP cannot know.
 // No deadline: after BOOK_WORK_MS the relay stops issuing turns and lets issued ones finish.
 const BOOK_FOOTER = ' Импортируй книгу по инструкциям MCP RKB одним длительным ходом: страница, пакет '+
-  'и processing/wait — не повод закончить ответ. При processing/wait проверяй status не чаще раза в 30–60 секунд; '+
-  'после пяти wait подряд закончи ход с status=done, продолжение обеспечит Launcher. '+
+  'и processing/wait — не повод закончить ответ. При processing/wait проверяй status не чаще раза в 30–60 секунд. '+
   'Если OpenAI явно отклонил вызов book_ingest клиентской проверкой безопасности, вызови '+
   'chatgpt_report(status=blocked, failure_kind=client_safety_rejection, summary=точный текст отказа; '+
   'без поля failure_kind начни summary с "failure_kind=client_safety_rejection. "). Ходы в Slack не публикуй.';
