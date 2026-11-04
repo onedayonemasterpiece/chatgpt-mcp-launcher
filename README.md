@@ -73,11 +73,12 @@ Run `npm test` to test the relay, extension logic and version reporting; mock te
     "books": [
       {"ingestion_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
       {"ingestion_id": "11111111-2222-3333-4444-555555555555", "telegram_original": "t.me/c/1/2"}
-    ],
-    "continuation_prompt": "Продолжай импорт текущей книги. Сначала book_ingest(status); принятые страницы не повторяй."
+    ]
   }
 }
 ~~~
+
+Тексты `prompt` и `continuation_prompt` вызывающего в книжные ходы **не передаются**: окно получает только книгу, `ingestion_id` и короткий footer, правила импорта — из инструкций MCP RKB.
 
 Книги идут **в указанном порядке**; подтверждённый RKB
 `state=finalized, next_action=done` создаёт новый чат через уже
@@ -99,7 +100,7 @@ Run `npm test` to test the relay, extension logic and version reporting; mock te
 мёртвым. `processing/wait`, недоступный RKB, `last_operation_at=null`
 **не** вызывают принудительный новый чат.
 
-Обычное завершение хода отправляет `continuation_prompt` в тот же чат.
+Обычное завершение хода отправляет следующий книжный ход в тот же чат.
 Продолжение ждёт свежего `staged/continue_pages`: `processing/wait` или
 недоступность РКБ не создают новые ходы. После terminal report книги ближайший
 обычный tick обновляет activity; снимок до конца хода не разрешает продолжение.
