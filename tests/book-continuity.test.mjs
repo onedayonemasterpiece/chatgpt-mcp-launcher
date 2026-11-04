@@ -43,6 +43,26 @@ async function fixture(t,{random=Math.random}={}) {
   return {q,file,now,start,deliver,activity,advance(ms){time+=ms;}};
 }
 
+
+// Owner decision 03.11: one client refusal gets one honest retry in a new chat, silently.
+async function refusedOnce(f,taskId,jobId) {
+  await f.q.modelReport({job_id:jobId,status:'blocked',failure_kind:'client_safety_rejection',summary:'First refusal'});
+  await f.q.tick();
+  assert.equal(f.q.status(taskId).book_task.state,'active','a single refusal does not end the book');
+  assert.equal(f.q.pendingBookNotices().length,0,'a single refusal is not reported');
+  f.advance(19*60_000);
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'retry waits 20 minutes');
+  f.advance(60_000);
+  await f.q.tick();
+  const retry=await f.q.claim('desktop');
+  assert.equal(retry?.action,'start','retry runs in a NEW chat');
+  assert.equal(retry.chat_url,null);
+  assert.match(retry.own_text,new RegExp(f.q.status(taskId).book_task.ingestion_id));
+  await f.q.report('desktop',{job_id:retry.id,status:'sent',chat_url:THIRD});
+  return retry;
+}
+
 test('status-only activity is not import progress; accepted pages resume a completed reader',async t=>{
   const f=await fixture(t);
   const first=await f.start();
@@ -497,15 +517,16 @@ test('a completed book report refreshes stale activity before another continuati
 });
 
 
-test('cached-schema safety refusal stops a sent successor, including after restart with a stored blocked report',async t=>{
+test('cached-schema repeated safety refusal stops a sent successor, including after restart with a stored blocked report',async t=>{
   for(const persisted of [false,true]) {
     const f=await fixture(t);
     const first=await f.start();
     await f.deliver(first);
     await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
+    const reader=await refusedOnce(f,first.job_id,first.job_id);
     f.advance(1);
     await f.activity(first);
-    await f.q.modelReport({job_id:first.job_id,status:'done'});
+    await f.q.modelReport({job_id:reader.id,status:'done'});
     await f.q.tick();
     const successorId=f.q.status(first.job_id).book_task.current_job_id;
     const sent=await f.deliver({job_id:successorId});
@@ -515,14 +536,14 @@ test('cached-schema safety refusal stops a sent successor, including after resta
     if(persisted) {
       // A pre-fix relay stored the cached-schema report but left its book active.
       const state=JSON.parse(await readFile(f.file,'utf8'));
-      const source=state.jobs.find(j=>j.id===first.job_id);
+      const source=state.jobs.find(j=>j.id===reader.id);
       source.model_status='blocked';source.model_summary=refusal;
       await writeFile(f.file,JSON.stringify(state));
       q=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
       await q.initialize();
       await q.tick();
     } else {
-      await q.modelReport({job_id:first.job_id,status:'blocked',summary:refusal});
+      await q.modelReport({job_id:reader.id,status:'blocked',summary:refusal});
     }
     await q.tick();
     assert.equal(q.status(first.job_id).book_task.state,'failed',persisted?'stored report':'cached schema');
@@ -530,8 +551,8 @@ test('cached-schema safety refusal stops a sent successor, including after resta
     const stop=await q.claim('desktop');
     assert.equal(stop?.action,'book_stop','sent successor needs the existing exact Stop');
     assert.equal(stop.after_job_id,sent.id);
-    assert.equal(stop.chat_url,CHAT);
-    await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:CHAT});
+    assert.equal(stop.chat_url,THIRD);
+    await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:THIRD});
     const prior=JSON.parse(await readFile(f.file,'utf8')).jobs
       .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action)).length;
     f.advance(25*60_000);
@@ -547,23 +568,24 @@ test('cached-schema safety refusal stops a sent successor, including after resta
   }
 });
 
-test('explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
+test('repeated explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
     await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
+  const reader=await refusedOnce(f,first.job_id,first.job_id);
   f.advance(1);
   const oldOperation=new Date(f.now()).toISOString();
   await f.activity(first,'staged',oldOperation); // A prior read arrived; the rejected stage did not.
-  await f.q.modelReport({job_id:first.job_id,status:'started'});
-  await f.q.modelReport({job_id:first.job_id,status:'done'});
+  await f.q.modelReport({job_id:reader.id,status:'started'});
+  await f.q.modelReport({job_id:reader.id,status:'done'});
   await f.q.tick();
   const queuedId=f.q.status(first.job_id).book_task.current_job_id;
   assert.equal(f.q.status(queuedId).status,'queued','finished turn queued continuation before late refusal');
 
   const other=await f.start([{ingestion_id:ING2}],'unrelated-book');
   const refusal='Script error: Этот вызов инструмента был заблокирован системами безопасности OpenAI. Внимательно проверьте отправляемые данные.';
-  const report={job_id:first.job_id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal};
+  const report={job_id:reader.id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal};
   await f.q.modelReport(report);
   await f.q.modelReport(report); // Duplicate callback must not create a second notice.
   await f.q.tick();
@@ -832,7 +854,10 @@ test('a rejected book reports once and advances independent books without operat
   for(const safety of [false,true]) {
     const f=await fixture(t);const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);await f.deliver(first);
     await f.activity(first);
-    if(safety)await f.q.modelReport({job_id:first.job_id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Explicit platform rejection'});
+    if(safety) {
+      const retry=await refusedOnce(f,first.job_id,first.job_id);
+      await f.q.modelReport({job_id:retry.id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Explicit platform rejection'});
+    }
     else await f.activity(first,'failed');
     await f.q.tick();
     assert.equal(f.q.status(first.job_id).book_task.state,'active');
@@ -890,4 +915,22 @@ test('finalized book does not let an unconfirmed predecessor block device rest',
   assert.equal(await f.q.claim('desktop'),null,'next book respects the full rest');
   f.advance(35*60_000);await f.q.tick();
   const next=await f.q.claim('desktop');assert.equal(next.action,'start');assert.match(next.own_text,new RegExp(ING2));
+});
+
+test('a single refusal is retried once; progress after the retry keeps the book without notices',async t=>{
+  const f=await fixture(t);
+  const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);
+  await f.deliver(first);
+  await f.activity(first);
+  const retry=await refusedOnce(f,first.job_id,first.job_id);
+  await f.q.modelReport({job_id:retry.id,status:'started'});
+  f.advance(60_000);
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);
+  await f.q.modelReport({job_id:retry.id,status:'done',summary:'Read on'});
+  await f.q.tick();
+  const next=await f.q.claim('desktop');
+  assert.equal(next?.action,'continue','the retried book continues in its new chat');
+  assert.equal(next.chat_url,THIRD);
+  assert.equal(next.book_index,0);
+  assert.equal(f.q.pendingBookNotices().length,0);
 });
