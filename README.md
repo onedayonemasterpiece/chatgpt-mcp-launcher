@@ -205,3 +205,7 @@ RKB требует `X-RKB-Service: launcher-import-watch`,
 сервисного доступа по loopback, двух параллельных **разных** книг,
 полного перехода и однократных Slack-уведомлений. Успешный `npm test`
 сам по себе не является live-приёмкой.
+
+### Browser dispatch lifetime
+
+A Chrome call that never returns cannot hold the device queue forever: send actions use the relay’s existing 15-minute claim lifetime. A timed-out send remains unconfirmed and is not automatically resent. The page driver checks the same claim time before every submission, so a delayed old script cannot click Send after the queue has moved on.
