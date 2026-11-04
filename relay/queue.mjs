@@ -1014,11 +1014,6 @@ export class FileQueue {
       await this.#save();
     });
   }
-  // A single client refusal gets one honest retry in a new chat; a repeated one ends the book.
-  #safetyRefusals(task) {
-    return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
-      ['start','continue'].includes(j.action)&&j.model_status==='blocked'&&clientSafetyMarker(j.model_summary));
-  }
   async #recordBookSafetyFailure(task,source,summary,now) {
     if(source.book_failure_reason)return;
     source.book_failure_reason='client_safety_rejection';
@@ -1050,10 +1045,8 @@ export class FileQueue {
       const job=jobs.at(-1);
       if(!job)continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
-      const refusals=this.#safetyRefusals(task);
-      const refusal=refusals[1]||jobs.find(j=>j.book_index===task.index&&j.book_failure_reason==='client_safety_rejection');
-      const retry=!refusal&&refusals.length===1&&job===refusals[0]&&
-        now-Date.parse(job.model_finished_at||job.model_last_report_at||job.created_at)>=BOOK_SILENCE_MS;
+      const refusal=jobs.find(j=>j.book_index===task.index&&j.model_status==='blocked'&&
+        (clientSafetyMarker(j.model_summary)||j.book_failure_reason==='client_safety_rejection'));
       if(refusal) {
         await this.#recordBookSafetyFailure(task,refusal,refusal.model_summary,now);
         changed=true;
@@ -1110,7 +1103,7 @@ export class FileQueue {
         Number.isInteger(job.book_accepted_pages_at_creation)&&
         activity.accepted_pages>job.book_accepted_pages_at_creation;
       const stale=this.#bookSilent(task,job,now);
-      const silent=(stale&&!finished)||retry||
+      const silent=(stale&&!finished)||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       if(this.#bookPaused(task.device_id,now))continue;
@@ -1127,8 +1120,6 @@ export class FileQueue {
             request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
             book_accepted_pages_at_creation:activity?.accepted_pages??null,book_replacement:replacement,
             book_stale:silent,[BOOK_INTERNAL]:true});
-          if(retry)console.log(JSON.stringify({event:'book_safety_retry',book_task_id:task.id,
-            refused_job_id:job.id,job_id:next.job_id,ingestion_id:task.books[task.index].ingestion_id}));
           task.job_id=next.job_id;task.last_enqueue_error=null;
           if(replacement)task.last_replacement_at=new Date(now).toISOString();
           changed=true;
@@ -1164,14 +1155,11 @@ export class FileQueue {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
       }
-      if(data.failure_kind==='client_safety_rejection'&&!clientSafetyMarker(job.model_summary))
-        job.model_summary='failure_kind=client_safety_rejection. '+job.model_summary;
       if(data.failure_kind==='client_safety_rejection'||
         (data.status==='blocked'&&clientSafetyMarker(data.summary))) {
         const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
           t.state==='active'&&t.index===job.book_index);
-        if(task&&this.#safetyRefusals(task).length>1)
-          await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
+        if(task) await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
