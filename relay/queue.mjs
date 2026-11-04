@@ -995,7 +995,8 @@ export class FileQueue {
       if(t.state!=='active'&&!t.notice_sent_at)
         return [...failures,{...shared,kind:'terminal',notice_id:t.id}];
       if(t.state==='active'&&t.no_progress_alert_id&&t.no_progress_notified_id!==t.no_progress_alert_id)
-        return [...failures,{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
+        // Earlier books' outcomes belong to the terminal notice, not to a warning about the current book.
+        return [...failures,{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id,terminal_summary:null}];
       return failures;
     });
   }

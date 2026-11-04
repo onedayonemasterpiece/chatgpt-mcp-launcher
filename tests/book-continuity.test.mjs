@@ -286,6 +286,12 @@ test('two confirmed replacements without a new RKB operation emit ONE warning, s
     assert.equal(observed.no_progress_new_chats,index);
     assert.equal(observed.state,'active');
   }
+  // An earlier book of the list failed; the warning is about the current one.
+  const saved=JSON.parse(await readFile(f.file,'utf8'));
+  saved.book_tasks[0].terminal_summary='\nold-book: failure_kind=client_safety_rejection';
+  const view=new FileQueue(f.file+'.view',{desktop:DEVICE},{now:f.now});
+  await writeFile(f.file+'.view',JSON.stringify(saved));await view.initialize();
+  assert.equal(view.pendingBookNotices()[0].terminal_summary,null,'an earlier book outcome is not repeated in a current-book warning');
   const notices=f.q.pendingBookNotices();
   assert.equal(notices.length,1);
   assert.equal(notices[0].kind,'no_progress');
