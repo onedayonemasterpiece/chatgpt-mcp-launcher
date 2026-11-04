@@ -92,11 +92,12 @@ const BOOK_FOOTER = ' Импортируй книгу по инструкция�
   'Если OpenAI явно отклонил вызов book_ingest клиентской проверкой безопасности, вызови '+
   'chatgpt_report(status=blocked, failure_kind=client_safety_rejection, summary=точный текст отказа; '+
   'без поля failure_kind начни summary с "failure_kind=client_safety_rejection. "). Ходы в Slack не публикуй.';
+// The caller's prompt texts are not forwarded: import must work from MCP instructions alone.
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
   return '(Книга '+(index+1)+' из '+task.books.length+': '+(selector.title?'«'+selector.title+'», ':'')+'ingestion_id='+selector.ingestion_id+
     (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
-    '. Сначала book_ingest(status) по этому ingestion_id.)\n\n'+task.continuation_prompt;
+    '. Сначала book_ingest(status) по этому ingestion_id.)';
 };
 
 // One plain instruction per state, so a calling agent always knows what to do next.
@@ -407,7 +408,6 @@ export class FileQueue {
       const book=args.book;
       if(book!==undefined) {
         if(action!=='start')throw Error('book is only accepted by chatgpt_start');
-        requireString(book.continuation_prompt,'book.continuation_prompt',MAX_PROMPT);
         if(!Array.isArray(book.books)||book.books.length<1||book.books.length>32)
           throw Error('book.books must contain 1-32 ordered ingestion selectors');
         for(const selector of book.books) {
@@ -421,7 +421,7 @@ export class FileQueue {
         }
         if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
           throw Error('Duplicate ingestion_id in book list');
-        prompt=bookPrompt({books:book.books,continuation_prompt:prompt},0);
+        prompt=bookPrompt({books:book.books},0);
       }
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
