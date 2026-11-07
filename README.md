@@ -73,11 +73,12 @@ Run `npm test` to test the relay, extension logic and version reporting; mock te
     "books": [
       {"ingestion_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
       {"ingestion_id": "11111111-2222-3333-4444-555555555555", "telegram_original": "t.me/c/1/2"}
-    ],
-    "continuation_prompt": "Продолжай импорт текущей книги. Сначала book_ingest(status); принятые страницы не повторяй."
+    ]
   }
 }
 ~~~
+
+Тексты `prompt` и `continuation_prompt` вызывающего в книжные ходы **не передаются**: окно получает только книгу, `ingestion_id` и короткий footer, правила импорта — из инструкций MCP RKB.
 
 Книги идут **в указанном порядке**; подтверждённый RKB
 `state=finalized, next_action=done` создаёт новый чат через уже
@@ -99,7 +100,7 @@ Run `npm test` to test the relay, extension logic and version reporting; mock te
 мёртвым. `processing/wait`, недоступный RKB, `last_operation_at=null`
 **не** вызывают принудительный новый чат.
 
-Обычное завершение хода отправляет `continuation_prompt` в тот же чат.
+Обычное завершение хода отправляет следующий книжный ход в тот же чат.
 Продолжение ждёт свежего `staged/continue_pages`: `processing/wait` или
 недоступность РКБ не создают новые ходы. После terminal report книги ближайший
 обычный tick обновляет activity; снимок до конца хода не разрешает продолжение.
@@ -149,14 +150,17 @@ Relay не опрашивает DOM и не создаёт поминутных 
 **Явный отказ клиентской защиты OpenAI:** если именно клиент ChatGPT
 отклонил `book_ingest(stage)` **до** RKB handler, читатель сообщает
 `chatgpt_report(status="blocked", failure_kind="client_safety_rejection",
-summary="<точный текст отказа>")`. Такое сообщение завершает попытку этой книги с ошибкой, отменяет её ещё не отправленные
-продолжения и автоматически переводит список к следующей независимой книге.
+summary="<точный текст отказа>")`. Причина отказов неизвестна, единичные могут не
+повторяться (решение владельца 03.11): первый отказ по книге без уведомления даёт
+один повтор той же книги тем же обычным prompt в новом чате через 20 минут
+(structured log `book_safety_retry`). Повторный отказ по той же книге завершает её
+попытку с ошибкой, отменяет ещё не отправленные продолжения и переводит список
+к следующей независимой книге.
 Обычные `done` и `blocked` без `failure_kind` не подменяют статус RKB.
 Серверный `failed/blocker` также не удерживает остальные книги списка.
 По каждой ошибке есть одно уведомление в координационный Slack-тред и structured log;
 квитанция уведомления переживает перезапуск. Список с ошибкой завершается как `failed`,
 а не как успешно импортированный. Ручного состояния ожидания оператора нет.
-Отклонённый явно запрещённый запрос не повторяется через новые чаты.
 Причина клиентского отказа расследуется по исходному событию и предшествующим операциям.
 
 **Конфигурация на сервере (только защищённый runtime конфиг):**
@@ -186,3 +190,7 @@ RKB требует `X-RKB-Service: launcher-import-watch`,
 сервисного доступа по loopback, двух параллельных **разных** книг,
 полного перехода и однократных Slack-уведомлений. Успешный `npm test`
 сам по себе не является live-приёмкой.
+
+### Browser dispatch lifetime
+
+A Chrome call that never returns cannot hold the device queue forever: send actions use the relay’s existing 15-minute claim lifetime. A timed-out send remains unconfirmed and is not automatically resent. The page driver checks the same claim time before every submission, so a delayed old script cannot click Send after the queue has moved on.
