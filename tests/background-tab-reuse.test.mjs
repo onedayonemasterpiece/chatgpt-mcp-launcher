@@ -501,3 +501,65 @@ test('missing refresh button reports bounded visible labels and path without cli
   assert.equal(result.message.includes('hidden-secret'),false);
   assert.equal(result.message.includes('private=omitted'),false);
 });
+
+test('one poll drains queued deliveries serially without waiting for another alarm',async()=>{
+  const queued=[1,2,3].map(n=>({id:'drain-'+n,action:'read',chat_url:CHAT}));
+  let claims=0,active=0,maxActive=0;
+  const executions=[],reports=[];
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>({ok:true,json:async()=>{
+      if(url.endsWith('/device/poll')) {claims++;return {job:queued.shift()||null};}
+      const body=JSON.parse(options.body);if(body.job_id)reports.push(body.job_id);return {ok:true};
+    }})});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async job=>{
+    active++;maxActive=Math.max(maxActive,active);await Promise.resolve();
+    executions.push(job.id);active--;return {status:'read',chat_url:CHAT};
+  };
+  const result=await f.sandbox.poll();
+  assert.deepEqual(executions,['drain-1','drain-2','drain-3']);
+  assert.deepEqual(reports,executions);
+  assert.equal(maxActive,1,'one browser action remains in flight');
+  assert.equal(claims,4,'stop at existing idle response');
+  assert.equal(result.job_id,'drain-3');
+  assert.equal(f.state.pendingReport,null);
+  assert.equal((await f.sandbox.poll()).idle,true);
+});
+
+test('queue drain stops at an unacknowledged report and retains reconciliation',async()=>{
+  let claims=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>{
+      if(url.endsWith('/device/report')&&JSON.parse(options.body).job_id)throw Error('report unavailable');
+      return {ok:true,json:async()=>url.endsWith('/device/poll')?{job:{id:'drain-report',action:'read',chat_url:CHAT}}:{ok:true}};
+    }});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async()=>{claims++;return {status:'read',chat_url:CHAT};};
+  assert.match((await f.sandbox.poll()).error,/report unavailable/);
+  assert.equal(claims,1);
+  assert.equal(f.state.pendingReport.job_id,'drain-report');
+});
+
+test('serial drain does not claim another job after commands are disabled',async()=>{
+  let claims=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url)=>({ok:true,json:async()=>url.endsWith('/device/poll')?
+      {job:{id:'disable-'+(++claims),action:'read',chat_url:CHAT}}:{ok:true}})});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async()=>{f.state.config.enabled=false;return {status:'read',chat_url:CHAT};};
+  assert.equal((await f.sandbox.poll()).job_id,'disable-1');
+  assert.equal(claims,1);
+  assert.equal((await f.sandbox.poll()).commands_disabled,true);
+});
+
+test('serial drain leaves remaining work queued when the loaded version changes',async()=>{
+  let claims=0,versions=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url)=>({ok:true,json:async()=>url.endsWith('/device/poll')?
+      {job:{id:'version-'+(++claims),action:'read',chat_url:CHAT}}:{ok:true}})});
+  f.sandbox.runningVersion=async()=>({update_state:++versions===1?'current':'outdated'});
+  f.sandbox.execute=async()=>({status:'read',chat_url:CHAT});
+  assert.equal((await f.sandbox.poll()).job_id,'version-1');
+  assert.equal(claims,1);
+  assert.equal(f.state.pendingReport,null);
+});
