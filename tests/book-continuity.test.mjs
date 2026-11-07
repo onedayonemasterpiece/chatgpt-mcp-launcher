@@ -94,6 +94,7 @@ test('30-minute active reading creates no browser probes or short tasks; real tu
   const first=await f.start();
   const initial=await f.deliver(first);
   assert.match(initial.own_text,new RegExp(ING1),'first window receives its book selector');
+  assert.doesNotMatch(initial.prompt,/после пяти wait подряд/,'warming must not end a reader before READY');
   await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'started'});
   for(let minute=0;minute<30;minute++) {
