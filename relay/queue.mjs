@@ -1013,10 +1013,11 @@ export class FileQueue {
       await this.#save();
     });
   }
-  // A single client refusal gets one honest retry in a new chat; a repeated one ends the book.
+  // Only refusals without newly accepted pages count toward the current streak.
   #safetyRefusals(task) {
     return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
-      ['start','continue'].includes(j.action)&&j.model_status==='blocked'&&clientSafetyMarker(j.model_summary));
+      ['start','continue'].includes(j.action)&&j.model_status==='blocked'&&clientSafetyMarker(j.model_summary)&&
+      (j.book_accepted_pages_at_creation??0)>=(task.activity?.accepted_pages??0));
   }
   async #recordBookSafetyFailure(task,source,summary,now) {
     if(source.book_failure_reason)return;
@@ -1050,8 +1051,8 @@ export class FileQueue {
       if(!job)continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
       const refusals=this.#safetyRefusals(task);
-      const refusal=refusals[1]||jobs.find(j=>j.book_index===task.index&&j.book_failure_reason==='client_safety_rejection');
-      const retry=!refusal&&refusals.length===1&&job===refusals[0]&&
+      const refusal=refusals[2]||jobs.find(j=>j.book_index===task.index&&j.book_failure_reason==='client_safety_rejection');
+      const retry=!refusal&&job.model_status==='blocked'&&clientSafetyMarker(job.model_summary)&&
         now-Date.parse(job.model_finished_at||job.model_last_report_at||job.created_at)>=BOOK_SILENCE_MS;
       if(refusal) {
         await this.#recordBookSafetyFailure(task,refusal,refusal.model_summary,now);
@@ -1169,7 +1170,7 @@ export class FileQueue {
         (data.status==='blocked'&&clientSafetyMarker(data.summary))) {
         const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
           t.state==='active'&&t.index===job.book_index);
-        if(task&&this.#safetyRefusals(task).length>1)
+        if(task&&this.#safetyRefusals(task).length>=3)
           await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.

@@ -524,58 +524,57 @@ test('a completed book report refreshes stale activity before another continuati
 });
 
 
-test('cached-schema repeated safety refusal stops a sent successor, including after restart with a stored blocked report',async t=>{
+test('accepted book pages reset safety refusal streak; next refusal retries in a new chat (including restart)',async t=>{
   for(const persisted of [false,true]) {
     const f=await fixture(t);
     const first=await f.start();
     await f.deliver(first);
     await f.activity(first,'staged',new Date(f.now()).toISOString(),13);
-    const reader=await refusedOnce(f,first.job_id,first.job_id);
-    f.advance(1);
-    await f.activity(first);
-    await f.q.modelReport({job_id:reader.id,status:'done'});
+    await f.q.modelReport({job_id:first.job_id,status:'blocked',
+      failure_kind:'client_safety_rejection',summary:'First refusal'});
     await f.q.tick();
-    const successorId=f.q.status(first.job_id).book_task.current_job_id;
-    const sent=await f.deliver({job_id:successorId});
-    await f.q.modelReport({job_id:sent.id,status:'started'});
+    assert.equal(f.q.status(first.job_id).book_task.state,'active');
+
+    f.advance(1);
+    const progressAt=new Date(f.now()).toISOString();
+    await f.activity(first,'staged',progressAt,14);
+    f.advance(21*60_000);
+    await f.activity(first,'staged',progressAt,14);
+    await f.q.tick();
+    const retry=await f.q.claim('desktop');
+    assert.equal(retry?.action,'start','first refusal uses a new chat');
+    await f.q.report('desktop',{job_id:retry.id,status:'sent',chat_url:THIRD});
+
     const refusal='failure_kind=client_safety_rejection. Script error: OpenAI client blocked book_ingest(status).';
     let q=f.q;
     if(persisted) {
-      // A pre-fix relay stored the cached-schema report but left its book active.
       const state=JSON.parse(await readFile(f.file,'utf8'));
-      const source=state.jobs.find(j=>j.id===reader.id);
+      const source=state.jobs.find(j=>j.id===retry.id);
       source.model_status='blocked';source.model_summary=refusal;
       await writeFile(f.file,JSON.stringify(state));
       q=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
       await q.initialize();
-      await q.tick();
     } else {
-      await q.modelReport({job_id:reader.id,status:'blocked',summary:refusal});
+      await q.modelReport({job_id:retry.id,status:'blocked',summary:refusal});
     }
     await q.tick();
-    assert.equal(q.status(first.job_id).book_task.state,'failed',persisted?'stored report':'cached schema');
-    assert.match(q.status(first.job_id).book_task.terminal_summary,/client_safety_rejection/);
-    const stop=await q.claim('desktop');
-    assert.equal(stop?.action,'book_stop','sent successor needs the existing exact Stop');
-    assert.equal(stop.after_job_id,sent.id);
-    assert.equal(stop.chat_url,THIRD);
-    await q.report('desktop',{job_id:stop.id,status:'stopped',chat_url:THIRD});
-    const prior=JSON.parse(await readFile(f.file,'utf8')).jobs
-      .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action)).length;
-    f.advance(25*60_000);
+    assert.equal(q.status(first.job_id).book_task.state,'active',
+      'progress separates the first and second refusals');
+    assert.equal(q.pendingBookNotices().length,0);
+
+    f.advance(21*60_000);
+    await q.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+      last_operation_at:progressAt,accepted_pages:14,next_cursor:'41'});
     await q.tick();
-    const reloaded=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
-    await reloaded.initialize();
-    await reloaded.tick();
-    const later=JSON.parse(await readFile(f.file,'utf8')).jobs
-      .filter(j=>j.book_task_id===first.job_id&&['start','continue'].includes(j.action));
-    assert.equal(later.length,prior,'no future book sends after reload');
-    assert.equal(await reloaded.claim('desktop'),null);
-    assert.equal(reloaded.pendingBookNotices().length,2,'one book error and one list completion notice');
+    const again=await q.claim('desktop');
+    assert.equal(again?.action,'start','second refusal below the threshold starts another chat');
+    assert.notEqual(again.id,retry.id);
+    assert.equal(q.status(first.job_id).book_task.state,'active');
+    assert.equal(q.pendingBookNotices().length,0);
   }
 });
 
-test('repeated explicit client safety rejection stops only this book after queued continuation; stale RKB cannot restart it',async t=>{
+test('three consecutive client safety refusals stop only this book; stale RKB cannot restart it',async t=>{
   const f=await fixture(t);
   const first=await f.start();
   await f.deliver(first);
@@ -583,9 +582,11 @@ test('repeated explicit client safety rejection stops only this book after queue
   const reader=await refusedOnce(f,first.job_id,first.job_id);
   f.advance(1);
   const oldOperation=new Date(f.now()).toISOString();
-  await f.activity(first,'staged',oldOperation); // A prior read arrived; the rejected stage did not.
+  await f.activity(first,'staged',oldOperation,13); // No accepted pages after the first refusal.
   await f.q.modelReport({job_id:reader.id,status:'started'});
   await f.q.modelReport({job_id:reader.id,status:'done'});
+  f.advance(21*60_000);
+  await f.activity(first,'staged',oldOperation,13);
   await f.q.tick();
   const queuedId=f.q.status(first.job_id).book_task.current_job_id;
   assert.equal(f.q.status(queuedId).status,'queued','finished turn queued continuation before late refusal');
@@ -594,11 +595,19 @@ test('repeated explicit client safety rejection stops only this book after queue
   const refusal='Script error: Этот вызов инструмента был заблокирован системами безопасности OpenAI. Внимательно проверьте отправляемые данные.';
   const report={job_id:reader.id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal};
   await f.q.modelReport(report);
-  await f.q.modelReport(report); // Duplicate callback must not create a second notice.
+  await f.q.modelReport(report); // Duplicate callback must not count as a third refusal.
+  await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.state,'active');
+  assert.equal(f.q.status(queuedId).status,'queued','two refusals do not cancel the next reader');
+  assert.equal(f.q.pendingBookNotices().length,0);
+  const third=await f.q.claim('desktop');
+  assert.equal(third.id,queuedId);
+  await f.q.report('desktop',{job_id:third.id,status:'sent',chat_url:THIRD});
+  await f.q.modelReport({job_id:third.id,status:'blocked',failure_kind:'client_safety_rejection',summary:refusal});
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.state,'failed');
   assert.ok(f.q.status(first.job_id).book_task.terminal_summary.endsWith(refusal));
-  assert.equal(f.q.status(queuedId).status,'expired','queued successor was never sent');
+  assert.equal(f.q.status(queuedId).status,'sent','third refusal comes from a delivered reader');
   assert.equal(f.q.pendingBookNotices().length,2);
   assert.equal(f.q.pendingBookNotices()[0].kind,'book_failure');
 
@@ -863,7 +872,14 @@ test('a rejected book reports once and advances independent books without operat
     await f.activity(first);
     if(safety) {
       const retry=await refusedOnce(f,first.job_id,first.job_id);
-      await f.q.modelReport({job_id:retry.id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Explicit platform rejection'});
+      await f.q.modelReport({job_id:retry.id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Second platform rejection'});
+      f.advance(21*60_000);
+      await f.q.tick();
+      const third=await f.q.claim('desktop');
+      assert.equal(third?.action,'start','two refusals still permit a new reader');
+      await f.q.report('desktop',{job_id:third.id,status:'sent',
+        chat_url:'https://chatgpt.com/c/22222222-3333-4444-5555-666666666666'});
+      await f.q.modelReport({job_id:third.id,status:'blocked',failure_kind:'client_safety_rejection',summary:'Third platform rejection'});
     }
     else await f.activity(first,'failed');
     await f.q.tick();
