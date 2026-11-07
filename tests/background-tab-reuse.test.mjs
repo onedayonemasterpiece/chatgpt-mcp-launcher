@@ -72,7 +72,7 @@ function fixture(openTabs=[],opts={}) {
   const random=Object.create(Math);
   if(opts.random!==undefined) random.random=()=>opts.random;
   const sandbox={chrome,URL,Date,Number,Math:random,AbortController,
-    setTimeout:(cb,ms)=>{calls.delays.push(ms);if(ms===180000){const id={};deadlines.set(id,cb);return id;}Promise.resolve().then(cb);return 1;},
+    setTimeout:(cb,ms)=>{calls.delays.push(ms);if(ms===180000||ms===900000){const id={};deadlines.set(id,cb);return id;}Promise.resolve().then(cb);return 1;},
     clearTimeout:id=>deadlines.delete(id),fetch:opts.fetch||async function(){throw Error('Unexpected fetch');}};
   runInNewContext(source,sandbox,{filename:'background.js',timeout:2000});
   return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads,
@@ -80,11 +80,11 @@ function fixture(openTabs=[],opts={}) {
     fireDeadline:()=>{assert.equal(deadlines.size,1);[...deadlines.values()][0]();}};
 }
 
-for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
+for(const action of ['read','reconcile','start','continue']) for(const hangAt of [1,2]) {
   test(`${action} Chrome call ${hangAt} keeps heartbeat live while busy and releases poll on timeout`,async()=>{
     const reports=[];
     let delivered=false;
-    const job={action,id:'read-only-job',chat_url:CHAT};
+    const job={action,id:'bounded-browser-job',chat_url:CHAT,prompt:'fixture prompt'};
     const f=fixture([{id:21,url:CHAT}],{hangAt,
       state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
       fetch:async(url,options)=>({ok:true,json:async()=>{
@@ -102,7 +102,7 @@ for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
     f.fireDeadline();
     const result=await pending;
     assert.equal(result.status,'needs_review');
-    assert.match(result.message,/read-only.*timed out/i);
+    assert.match(result.message,['start','continue'].includes(action)?/delivery.*unconfirmed/i:/read-only.*timed out/i);
     assert.equal(f.state.pendingReport,null);
     assert.equal(f.deadlines.size,0,'deadline timer cleaned up');
     assert.equal(reports.filter(r=>r.type==='heartbeat').length,2);
@@ -115,20 +115,17 @@ for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
   });
 }
 
-test('probe deadline bounds inspection while start/continue stay outside it',async()=>{
+test('all Chrome calls are bounded; send timeouts preserve unknown delivery and release polling',async()=>{
   for(const action of ['probe','start','continue']) {
     const f=fixture([{id:21,url:CHAT}],{hangAt:1});
     const pending=f.sandbox.runDriver('page-driver.js',{id:21},{action,chat_url:CHAT});
     await Promise.resolve();
-    if(action==='probe') {
-      f.fireDeadline();
-      await assert.rejects(pending,/read-only.*timed out/i);
-      assert.equal(f.deadlines.size,0);
-    } else {
-      assert.equal(f.deadlines.size,0,'prompt actions have no inspection timeout');
-      f.releaseScript();
-      assert.equal((await pending).result.status,'sent');
-    }
+    assert.equal(f.deadlines.size,1);
+    assert.ok(f.calls.delays.includes(action==='probe'?180000:900000));
+    f.fireDeadline();
+    await assert.rejects(pending,action==='probe'?/read-only.*timed out/i:/delivery.*unconfirmed/i);
+    assert.equal(f.deadlines.size,0);
+    f.releaseScript();
   }
 });
 
@@ -227,11 +224,11 @@ test('start and continue wait a varied few seconds after opening or focusing a c
   for(const [random,expected] of [[0,1500],[0.5,2500],[0.9999,3500]]) {
     const f=fixture([{id:21,url:CHAT}],{random});
     await f.execute({action:'continue',chat_url:CHAT,prompt:'Continue'});
-    assert.deepEqual(f.calls.delays,[expected]);
+    assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[expected]);
   }
   const f=fixture([],{random:0.5});
   await f.execute({action:'start',prompt:'New conversation'});
-  assert.deepEqual(f.calls.delays,[2500]);
+  assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[2500]);
 });
 
 test('open-only reuses existing conversation and never touches composer or Send button',async()=>{
@@ -304,7 +301,7 @@ test('start falls back to a fresh tab when the open New chat tab holds a draft',
   assert.equal(f.calls.created.length,1);
   assert.equal(f.calls.created[0].url,HOME);
   assert.deepEqual(f.calls.injections,[32,32,100,100]);
-  assert.deepEqual(f.calls.delays,[2500,2500]);
+  assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[2500,2500]);
 });
 
 test('Frame 0 removed after Send is recovered only from a matching read-only job marker',async()=>{

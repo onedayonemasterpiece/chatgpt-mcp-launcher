@@ -7,8 +7,9 @@ const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
                   transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false,
-                  commandResult=true,refuseInput=false,delayedInput=false}={}) {
+                  commandResult=true,refuseInput=false,delayedInput=false,expireAfterInsert=false}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
+ let clock=0;
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
@@ -63,7 +64,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    execCommand:(command,_show,text)=>{
      if(command==='insertParagraph'){editor.innerText+='\n';return true;}
      if(command==='delete'){state.deletes=(state.deletes||0)+1;editor.innerText='';return true;}
-     assert.equal(command,'insertText');state.insertions++;
+     assert.equal(command,'insertText');state.insertions++;if(expireAfterInsert)clock=900001;
      if(!refuseInput) {
        const apply=()=>{editor.innerText+=reformat(text);};
        if(delayedInput) Promise.resolve().then(apply); else apply();
@@ -74,6 +75,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      getSelection:()=>({removeAllRanges(){},addRange(){}})},
    DataTransfer:class DataTransfer {constructor(){this.d={};}setData(t,v){this.d[t]=v;}getData(t){return this.d[t];}},
    ClipboardEvent:class ClipboardEvent {constructor(type,init){Object.assign(this,init,{type});}},
+   Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
@@ -191,6 +193,7 @@ function readFixture({replies=[],streaming=false,historyError=false,frames=[],hr
    execCommand:()=>{state.insertions++;return true;}
  };
  const sandbox={window:{location:{href},getComputedStyle:()=>({visibility:'visible',display:'block'})},
+   Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
  sandbox.globalThis=sandbox;
@@ -342,4 +345,14 @@ test('an ignored Enter is followed by exactly one click once the Send button is 
  assert.equal(f.state.enters,1);
  assert.equal(f.state.clicks,1);
  assert.match(result.message,/after an ignored Enter/);
+});
+
+for(const late of [false,true]) test(`expired send cannot click after a delayed browser action (after insert=${late})`,async()=>{
+ const f=fixture({expireAfterInsert:late});
+ const result=await f.run({action:'start',prompt:'do not send expired work',effort:'auto',claimed_at:late?'1970-01-01T00:00:00.000Z':'1969-12-31T23:00:00.000Z'});
+ assert.equal(result.status,'needs_review');
+ assert.match(result.message,/expired/i);
+ assert.equal(f.state.clicks,0);
+ assert.equal(f.state.enters,0);
+ if(!late)assert.equal(f.state.insertions,0);
 });

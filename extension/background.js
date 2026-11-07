@@ -195,6 +195,9 @@ function driverScript() {
   return BOOT_BUILD?.driver_file && /^page-driver-[a-f0-9]{40}\.js$/.test(BOOT_BUILD.driver_file) ? BOOT_BUILD.driver_file : 'page-driver.js';
 }
 async function runDriver(script,tab,payload) {
+  const sending=['start','continue'].includes(payload.action);
+  // Reuse the relay's 15-minute claim lifetime; a late script cannot send expired work.
+  if(sending)payload={...payload,claimed_at:payload.claimed_at||new Date().toISOString()};
   const invoke=async()=>{
     try {
       await chrome.scripting.executeScript({target:{tabId:tab.id},files:[script]});
@@ -215,14 +218,15 @@ async function runDriver(script,tab,payload) {
       throw new Error(`${error.message}; ${context}`);
     }
   };
-  if(!['read','reconcile','probe','book_stop'].includes(payload.action)) return invoke();
+  if(!sending&&!['read','reconcile','probe','book_stop'].includes(payload.action)) return invoke();
   // Composer (90s) + history (60s) + settling (1s), with Chrome API headroom.
   let timer;
   try {
     return await Promise.race([invoke(),new Promise((_,reject)=>{
-      timer=setTimeout(()=>reject(new Error(payload.action==='book_stop' ?
+      timer=setTimeout(()=>reject(new Error(sending ?
+        'Browser send timed out; delivery remains unconfirmed; do not resend' : payload.action==='book_stop' ?
         'Book Stop observation timed out; outcome unconfirmed' :
-        'Read-only browser inspection timed out; no prompt submitted')),180000);
+        'Read-only browser inspection timed out; no prompt submitted')),sending?900000:180000);
     })]);
   } finally {clearTimeout(timer);}
 }

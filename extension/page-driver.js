@@ -318,6 +318,9 @@
     if (job.action === 'continue' && !isConversationUrl(window.location.href)) {
       return {status:'blocked',message:'Not on a ChatGPT conversation URL'};
     }
+    const expired=()=>Date.now()-Date.parse(job.claimed_at)>=900000;
+    const expiryResult=()=>({status:'needs_review',message:'Browser delivery claim expired; no further submission permitted'});
+    if(expired())return expiryResult();
     const before=window.location.href;
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
@@ -358,6 +361,7 @@
     }
     const submit=await waitForSend(ready,job.prompt);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
+    if(expired())return expiryResult();
     let method;
     try {
       if(submit.button) {
@@ -380,6 +384,7 @@
           if(!now || !promptFirst(draftText(now),job.prompt)) break;
           if(i===19) {
             const button=submitButton(now);
+            if(expired())return expiryResult();
             if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';}
           }
         }
