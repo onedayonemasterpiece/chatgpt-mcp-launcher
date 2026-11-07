@@ -172,7 +172,7 @@
         // ChatGPT (live job at 18:58 UTC), so it is not used.
         // On a long prompt the Send button can take several seconds to enable;
         // a synthetic Enter is often ignored (live 22 Oct), so it is the last resort.
-        if(i>=120) return {enter:true,editor:current};
+        if(i>=12) return {enter:true,editor:current};
       }
       await sleep(250);
     }
