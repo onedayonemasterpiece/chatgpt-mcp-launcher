@@ -14,7 +14,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
+ const state={elapsedMs:0,clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -32,7 +32,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    closest:selector=>selector==='form'&&!noForm?form:null,
    focus:()=>{document.activeElement=editor;},
    dispatchEvent:event=>{
-     if(event.type==='keydown'&&event.key==='Enter'){state.enters++;if(enterDelivers)delivered();}
+     if(event.type==='keydown'&&event.key==='Enter'){state.firstEnterAtMs??=state.elapsedMs;state.enters++;if(enterDelivers)delivered();}
      if(event.type==='keydown'&&event.key===' ')state.spaces++;
      if(event.type==='paste'){
        state.pastes++;
@@ -77,7 +77,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    ClipboardEvent:class ClipboardEvent {constructor(type,init){Object.assign(this,init,{type});}},
    Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
-   setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
+   setTimeout:(cb,ms)=>{state.elapsedMs+=ms;Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
  sandbox.globalThis=sandbox;
  runInNewContext(src,sandbox,{timeout:1500,filename:'page-driver.js'});
@@ -339,7 +339,7 @@ test('a blocked job describes the window in plain fields for the coordinator',as
 
 test('an ignored Enter is followed by exactly one click once the Send button is enabled',async()=>{
  // The button becomes findable only after the Enter fallback has fired.
- const f=fixture({noForm:true,delayedButtonPolls:121});
+ const f=fixture({noForm:true,delayedButtonPolls:13});
  const result=await f.run({action:'start',prompt:'long prompt',effort:'auto'});
  assert.equal(result.status,'sent',JSON.stringify(result));
  assert.equal(f.state.enters,1);
@@ -355,4 +355,22 @@ for(const late of [false,true]) test(`expired send cannot click after a delayed 
  assert.equal(f.state.clicks,0);
  assert.equal(f.state.enters,0);
  if(!late)assert.equal(f.state.insertions,0);
+});
+
+
+test('absent Send button uses the existing single Enter fallback after three seconds',async()=>{
+ const f=fixture({noButton:true,noForm:true,enterDelivers:true});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent');
+ assert.equal(f.state.firstEnterAtMs,3100,'100ms editor reconciliation plus twelve250ms polls');
+ assert.equal(f.state.enters,1);
+ assert.equal(f.state.clicks+f.state.nativeSubmits,0);
+});
+
+test('a Send button hydrated within three seconds still submits through one button click',async()=>{
+ const f=fixture({noForm:true,delayedButtonPolls:8});
+ const result=await f.run({action:'start',prompt:'long prompt',effort:'auto'});
+ assert.equal(result.status,'sent');
+ assert.equal(f.state.clicks,1);
+ assert.equal(f.state.enters+f.state.nativeSubmits,0);
 });
