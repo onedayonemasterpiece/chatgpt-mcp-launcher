@@ -426,7 +426,7 @@ async function poll() {
   }
   polling=true;
   try {
-    const {config}=await api.get('config');
+    let {config}=await api.get('config');
     if(!config?.token || !config?.url) return {unconfigured:true};
     await flushPending(config);
     const version=await sendHeartbeat(config);
@@ -439,18 +439,25 @@ async function poll() {
       commands_blocked:true,reason:'Running version is not verified against installed files',
       heartbeat_sent:true,version,
     };
-    const data=await relayFetch(config,'GET','/device/poll');
-    const job=data.job;
-    if(!job) return {idle:true,heartbeat_sent:true,version};
-    await api.set({pendingReport:{job_id:job.id,status:'needs_review',
-      message:'Browser action interrupted; verify before retrying'}});
-    let result;
-    try {result=await execute(job);}
-    catch(err) {result={status:'needs_review',
-      message:'Automation failed or was interrupted: '+err.message+'. Check the tab before retrying.'};}
-    await api.set({pendingReport:{job_id:job.id,...result}});
-    await flushPending(config);
-    return {job_id:job.id,...result,version};
+    let completed;
+    for(;;) {
+      config=(await api.get('config')).config;
+      if(!config?.enabled)return completed||{commands_disabled:true};
+      if(completed&&(await sendHeartbeat(config)).update_state!=='current')return completed;
+      const data=await relayFetch(config,'GET','/device/poll');
+      const job=data.job;
+      if(!job) return completed||{idle:true,heartbeat_sent:true,version};
+      await api.set({pendingReport:{job_id:job.id,status:'needs_review',
+        message:'Browser action interrupted; verify before retrying'}});
+      let result;
+      try {result=await execute(job);}
+      catch(err) {result={status:'needs_review',
+        message:'Automation failed or was interrupted: '+err.message+'. Check the tab before retrying.'};}
+      await api.set({pendingReport:{job_id:job.id,...result}});
+      await flushPending(config);
+      completed={job_id:job.id,...result,version};
+      if(['blocked','needs_review','failed'].includes(result.status))return completed;
+    }
   } catch(err) {
     await api.set({lastError:{message:String(err.message||err).slice(0,350),at:new Date().toISOString()}});
     return {error:String(err.message||err)};
