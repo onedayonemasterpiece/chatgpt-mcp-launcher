@@ -16,7 +16,6 @@ const MAX_JOBS = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
 const BOOK_SILENCE_MS = 20 * 60_000;
-const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
 const clientSafetyMarker=s=>typeof s==='string'&&
   /^failure_kind=client_safety_rejection\.\s+\S/.test(s);
@@ -85,7 +84,7 @@ export function callbackFooter(jobId) {
     ' status=started, в конце status=done и summary; если нужно чьё-то решение — status=blocked и в summary какое и от кого.)';
 }
 // Import rules live in the RKB MCP instructions; this adds only what MCP cannot know.
-// No deadline: after BOOK_WORK_MS the relay stops issuing turns and lets issued ones finish.
+// Automatic work-cycle rests are suspended by the owner while import throughput recovers.
 const BOOK_FOOTER = ' Импортируй книгу по инструкциям MCP RKB одним длительным ходом: страница, пакет '+
   'и processing/wait — не повод закончить ответ. При processing/wait проверяй status не чаще раза в 30–60 секунд. '+
   'Если OpenAI явно отклонил вызов book_ingest клиентской проверкой безопасности, вызови '+
@@ -211,18 +210,12 @@ export class FileQueue {
     return until>now?new Date(until).toISOString():null;
   }
   #bookPaused(deviceId,now=this.now()) {
-    const cycle=this.#state.book_cycles[deviceId];
-    return !!cycle && (cycle.resume_at>now ||
-      (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
+    return this.#restUntil(deviceId,now)!==null;
   }
   #bookTurnReleased(job) {
     const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id);
     return MODEL_FINAL.includes(job.model_status)||!!job.page_completed_at||
       !!task&&this.#bookSilent(task,job,this.now());
-  }
-  #unfinishedBookTurns(task) {
-    return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
-      ['start','continue'].includes(j.action)&&['claimed','sent','needs_review'].includes(j.status)&&!this.#bookTurnReleased(j));
   }
   #bookSilent(task,job,now) {
     const activity=task.activity;
@@ -234,27 +227,8 @@ export class FileQueue {
   #advanceBookRest(now) {
     let changed=false;
     for(const [deviceId,cycle] of Object.entries(this.#state.book_cycles)) {
-      if(cycle.resume_at) {
-        if(now>=cycle.resume_at) {delete this.#state.book_cycles[deviceId];changed=true;}
-      } else if(now-cycle.started_at>=BOOK_WORK_MS) {
-        for(const job of this.#state.jobs) if(job.device_id===deviceId&&job.book_task_id&&
-          ['start','continue'].includes(job.action)&&job.status==='queued') {
-          Object.assign(job,{status:'expired',reported_at:iso(now),
-            message:'Book rest'});
-          this.#notifyJob(job,'book_rest');
-          changed=true;
-        }
-        const working=this.#state.book_tasks.some(task=>{
-          if(task.state!=='active'||task.device_id!==deviceId)return false;
-          const job=this.#state.jobs.find(j=>j.id===task.job_id);
-          if(!job)return true; // missing current turn cannot prove termination
-          if(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))return false;
-          if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
-          return this.#unfinishedBookTurns(task).length>0;
-        });
-        if(working)continue; // stop new book claims, finish already-issued turns
-        cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
-        changed=true;
+      if(cycle.resume_at && now>=cycle.resume_at) {
+        delete this.#state.book_cycles[deviceId];changed=true;
       }
     }
     return changed;
