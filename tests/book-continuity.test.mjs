@@ -145,6 +145,50 @@ test('uncertain delivery and other blocked starts never use the unsent-draft con
   });
 });
 
+test('queue compaction retains the active book current final receipt',async t=>{
+  const f=await fixture(t);const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'failed',summary:'Local schema failure'});
+  const state=JSON.parse(await readFile(f.file,'utf8'));
+  state.jobs.push(...Array.from({length:499},(_,i)=>({id:'old-closed-'+i,action:'close',
+    status:'closed',device_id:'desktop',created_at:new Date(f.now()).toISOString()})));
+  await writeFile(f.file,JSON.stringify(state));
+  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
+  await restored.enqueue({action:'start',prompt:'Independent fixture work',request_id:'unrelated'});
+  assert.equal(restored.status(first.job_id)?.model_status,'failed');
+  assert.equal((JSON.parse(await readFile(f.file,'utf8'))).jobs.length,500);
+});
+
+test('a pruned final book receipt still drives the existing ordinary handoff',async t=>{
+  for(const terminal of ['failed','blocked','unknown','safety']) await t.test('archived '+terminal,async t=>{
+    const blocked=terminal!=='failed';
+    const f=await fixture(t);const first=await f.start();await f.deliver(first);
+    await f.activity(first,'staged',new Date(f.now()).toISOString(),0);
+    await f.q.modelReport({job_id:first.job_id,status:['blocked','safety'].includes(terminal)?'blocked':'failed',summary:'Fixture terminal report',
+      ...(terminal==='safety'?{failure_kind:'client_safety_rejection'}:{})});
+    const state=JSON.parse(await readFile(f.file,'utf8'));
+    const job=state.jobs.find(j=>j.id===first.job_id);
+    state.jobs=state.jobs.filter(j=>j.id!==job.id);
+    if(terminal==='unknown'){job.model_status=null;job.status='needs_review';}
+    const {prompt,handoff_prefix,model_summary,model_progress,...receipt}=job;
+    state.request_receipts.push({device_id:job.device_id,request_id:job.request_id,
+      action:job.action,job:{...receipt,archived:true}});
+    await writeFile(f.file,JSON.stringify(state));
+    f.advance(21*60_000);
+    const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
+    await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+      last_operation_at:new Date(f.now()-21*60_000).toISOString(),accepted_pages:0});
+    await restored.tick();
+    const next=await restored.claim('desktop');
+    if(blocked)assert.equal(next,null,'an archived blocked summary cannot be inferred as permission to continue');
+    else {
+      assert.equal(next?.action,'start','the existing unknown-count rollover remains unchanged');
+      assert.equal(next.chat_url,null);
+      assert.equal(next.book_task_id,first.job_id);assert.equal(next.book_index,0);
+      assert.equal((JSON.parse(await readFile(f.file,'utf8'))).request_receipts[0].job.model_status,'failed');
+    }
+  });
+});
+
 test('status-only activity is not import progress; accepted pages resume a completed reader',async t=>{
   const f=await fixture(t);
   const first=await f.start();

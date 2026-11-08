@@ -505,6 +505,7 @@ export class FileQueue {
         // second browser send after a restart. The existing bounded queue may
         // reject new work rather than erase an unresolved delivery.
         const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status)&&
+          !this.#state.book_tasks.some(t=>t.state==='active'&&t.job_id===j.id)&&
           j.status!=='needs_review'&&
           !(j.status==='sent'&&['started','progress','awaiting_confirmation','unconfirmed','unknown'].includes(this.#execution(j)))&&
           !(j.previous_chat_url&&j.status==='sent'&&!j.result_chat_url));
@@ -1026,10 +1027,10 @@ export class FileQueue {
     let changed=false;
     for(const task of this.#state.book_tasks) {
       if(task.state!=='active')continue;
-      const jobs=this.#state.jobs.filter(j=>j.book_task_id===task.id&&
+      const jobs=[...this.#state.request_receipts.map(r=>r.job),...this.#state.jobs].filter(j=>j.book_task_id===task.id&&
         ['start','continue'].includes(j.action));
       const job=jobs.at(-1);
-      if(!job)continue;
+      if(!job||job.archived&&(!MODEL_FINAL.includes(job.model_status)||job.model_status==='blocked'&&!job.book_failure_reason))continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
       const refusals=this.#safetyRefusals(task);
       const refusal=refusals[1]||jobs.find(j=>j.book_index===task.index&&j.book_failure_reason==='client_safety_rejection');
