@@ -544,7 +544,6 @@ test('existing relay timer invokes injected RKB test double only for active inge
 
 test('existing relay poll discovers finalization within a minute without a model callback',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'launcher-minute-progress-'));
-  t.after(()=>rm(dir,{recursive:true,force:true}));
   let now=Date.now(),finalized=false,calls=0;
   t.mock.method(Date,'now',()=>now);
   const {queue,server}=await makeRelay({file:join(dir,'state.json'),mcpToken:'mcp-'.repeat(9),
@@ -556,7 +555,10 @@ test('existing relay poll discovers finalization within a minute without a model
         last_operation_at:new Date(now).toISOString(),accepted_pages:2,next_cursor:'5'};
     }});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  t.after(async()=>{
+    await new Promise(resolve=>server.close(resolve));
+    await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:20});
+  });
   const first=await queue.enqueue({action:'start',prompt:'Import',request_id:'minute-progress',
     slack_thread_url:THREAD,book:{books:[{ingestion_id:ING1},{ingestion_id:ING2}],continuation_prompt:CONTINUE}});
   await queue.claim('desktop');await queue.report('desktop',{job_id:first.job_id,status:'sent',chat_url:CHAT});
