@@ -207,12 +207,12 @@ export class FileQueue {
     this.seenThisProcess = new Set();
     this.verifiedThisProcess = new Set();
   }
-  #restUntil(deviceId,now=this.now()) {
-    const until=this.#state.book_cycles[deviceId]?.resume_at;
+  #restUntil(taskId,now=this.now()) {
+    const until=this.#state.book_cycles[taskId]?.resume_at;
     return until>now?new Date(until).toISOString():null;
   }
-  #bookPaused(deviceId,now=this.now()) {
-    const cycle=this.#state.book_cycles[deviceId];
+  #bookPaused(taskId,now=this.now()) {
+    const cycle=this.#state.book_cycles[taskId];
     return !!cycle && (cycle.resume_at>now ||
       (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
   }
@@ -234,26 +234,23 @@ export class FileQueue {
   }
   #advanceBookRest(now) {
     let changed=false;
-    for(const [deviceId,cycle] of Object.entries(this.#state.book_cycles)) {
+    for(const [taskId,cycle] of Object.entries(this.#state.book_cycles)) {
       if(cycle.resume_at) {
-        if(now>=cycle.resume_at) {delete this.#state.book_cycles[deviceId];changed=true;}
+        if(now>=cycle.resume_at) {delete this.#state.book_cycles[taskId];changed=true;}
       } else if(now-cycle.started_at>=BOOK_WORK_MS) {
-        for(const job of this.#state.jobs) if(job.device_id===deviceId&&job.book_task_id&&
+        for(const job of this.#state.jobs) if(job.book_task_id===taskId&&
           ['start','continue'].includes(job.action)&&job.status==='queued') {
           Object.assign(job,{status:'expired',reported_at:iso(now),
             message:'Book rest'});
           this.#notifyJob(job,'book_rest');
           changed=true;
         }
-        const working=this.#state.book_tasks.some(task=>{
-          if(task.state!=='active'||task.device_id!==deviceId)return false;
-          const job=this.#state.jobs.find(j=>j.id===task.job_id);
-          if(!job)return true; // missing current turn cannot prove termination
-          if(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))return false;
-          if(task.activity?.state==='processing')return true; // do not interrupt an RKB save
-          return this.#unfinishedBookTurns(task).length>0;
-        });
-        if(working)continue; // stop new book claims, finish already-issued turns
+        const task=this.#state.book_tasks.find(task=>task.id===taskId);
+        const job=this.#state.jobs.find(job=>job.id===task?.job_id);
+        const working=task?.state==='active'&&(!job||
+          !(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))&&
+          (task.activity?.state==='processing'||this.#unfinishedBookTurns(task).length>0));
+        if(working)continue; // finish this window’s issued turns before its full rest
         cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
         changed=true;
       }
@@ -361,6 +358,15 @@ export class FileQueue {
         request_receipts:Array.isArray(parsed.request_receipts)?parsed.request_receipts:[],
         book_tasks:Array.isArray(parsed.book_tasks)?parsed.book_tasks:[],
         book_cycles:parsed.book_cycles||{}};
+      // Preserve an existing shared cycle, including its already assigned rest.
+      // Only its ownership changes; no work or rest clock is reset.
+      for(const deviceId of Object.keys(this.devices)) {
+        const cycle=this.#state.book_cycles[deviceId];
+        if(!cycle)continue;
+        for(const task of this.#state.book_tasks)if(task.device_id===deviceId&&task.state==='active')
+          this.#state.book_cycles[task.id]??={...cycle};
+        delete this.#state.book_cycles[deviceId];
+      }
       // A delivery interrupted by a restart is simply retried with the same eventId.
       for(const item of this.#state.outbox) if(item.state==='sending') item.state='pending';
       for(const task of this.#state.book_tasks)if(task.state==='blocked')task.state='failed';
@@ -478,8 +484,8 @@ export class FileQueue {
         }
       }
       if((book||(internalBook&&args.book_task_id))&&['start','continue'].includes(action)&&
-        this.#bookPaused(deviceId))
-        throw Error('Book import rest until '+(this.#restUntil(deviceId)||
+        this.#bookPaused(args.book_task_id))
+        throw Error('Book import rest until '+(this.#restUntil(args.book_task_id)||
           'current turns finish, followed by a full 35–90 minute pause'));
       if(action==='reconcile' && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
@@ -658,8 +664,8 @@ export class FileQueue {
     return next;
   }
   #markDelivered(job) {
-    if(job.book_task_id&&!this.#state.book_cycles[job.device_id])
-      this.#state.book_cycles[job.device_id]={started_at:this.now()};
+    if(job.book_task_id&&!this.#state.book_cycles[job.book_task_id])
+      this.#state.book_cycles[job.book_task_id]={started_at:this.now()};
     if(job.action!=='continue'||job.delivery_action==='start'||job.delivery_counted) return;
     const chat=this.#state.chats.find(c=>c.chat_url===job.chat_url&&c.device_id===job.device_id);
     if(chat) {
@@ -981,7 +987,7 @@ export class FileQueue {
       accepted_pages:task.activity?.accepted_pages??null,next_cursor:task.activity?.next_cursor||null,
       no_progress_new_chats:task.no_progress_new_chats||0,
       terminal_summary:task.terminal_summary||null,last_enqueue_error:task.last_enqueue_error||null,
-      rest_until:task.state==='active'?this.#restUntil(task.device_id):null};
+      rest_until:task.state==='active'?this.#restUntil(task.id):null};
   }
   pendingBookNotices() {
     return this.#state.book_tasks.flatMap(t=>{
@@ -1074,7 +1080,7 @@ export class FileQueue {
           task.state=task.terminal_summary?'failed':'done';
           task.terminal_summary||='All '+task.books.length+' books finalized in RKB';
         } else {
-          if(this.#bookPaused(task.device_id,now))continue;
+          if(this.#bookPaused(task.id,now))continue;
           const nextIndex=task.index+1;
           try {
             const next=await this.#enqueue({action:'start',prompt:bookPrompt(task,nextIndex),
@@ -1117,7 +1123,7 @@ export class FileQueue {
       const silent=unsent||(stale&&!finished)||retry||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
-      if(this.#bookPaused(task.device_id,now))continue;
+      if(this.#bookPaused(task.id,now))continue;
       if(silent||finished) {
         if(!url&&!silent)continue;
         const chat=this.#state.chats.find(c=>c.chat_url===url&&c.device_id===task.device_id);
