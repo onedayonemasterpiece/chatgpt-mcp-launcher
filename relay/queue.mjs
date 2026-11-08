@@ -1173,6 +1173,8 @@ export class FileQueue {
     let changed=false;
     for(const job of this.#state.jobs) {
       if(!['queued','claimed'].includes(job.status))continue;
+      if(job.status==='queued'&&this.#state.book_tasks.some(t=>
+        t.state==='active'&&t.job_id===job.id&&t.index===job.book_index))continue;
       const since=Date.parse(job.status==='queued'?job.created_at:job.claimed_at);
       if(!(now-since>STALE_MS))continue;
       const at=new Date(now).toISOString();

@@ -125,6 +125,18 @@ test('uncertain delivery and other blocked starts never use the unsent-draft con
   });
 });
 
+test('current book queue time does not consume its browser execution lease',async t=>{
+  const f=await fixture(t);const book=await f.start();
+  const ordinary=await f.q.enqueue({action:'start',prompt:'Unrelated request',request_id:'ordinary'});
+  f.advance(16*60_000);
+  assert.equal(f.q.status(book.job_id).status,'queued','an assigned book remains durable while waiting behind another window');
+  assert.equal(f.q.status(ordinary.job_id).status,'expired','ordinary request staleness is unchanged');
+  const picked=await f.q.claim('desktop');assert.equal(picked?.id,book.job_id);
+  assert.equal(picked.claimed_at,new Date(f.now()).toISOString(),'execution lease starts at actual pickup');
+  f.advance(16*60_000);
+  assert.equal(f.q.status(book.job_id).status,'needs_review','an unreported send remains unknown after the original claim timeout');
+});
+
 test('queue compaction retains the active book current final receipt',async t=>{
   const f=await fixture(t);const first=await f.start();await f.deliver(first);
   await f.q.modelReport({job_id:first.job_id,status:'failed',summary:'Local schema failure'});
@@ -884,7 +896,9 @@ test('an undelivered initial reader with zero RKB operations recovers without an
     f.advance(21*60_000);
     await f.q.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',last_operation_at:null,accepted_pages:0,next_cursor:'0'});
     await f.q.tick();const next=await f.q.claim('desktop');
-    assert.equal(next?.action,'start');assert.notEqual(next.id,first.job_id);
+    assert.equal(next?.action,'start');
+    if(uncertain)assert.notEqual(next.id,first.job_id);
+    else assert.equal(next.id,first.job_id,'reuse the still-queued book request instead of expiring and replacing it');
     assert.equal(next.book_task_id,first.job_id);assert.match(next.own_text,new RegExp(ING1));
     await f.q.tick();assert.equal(await f.q.claim('desktop'),null);
   }
