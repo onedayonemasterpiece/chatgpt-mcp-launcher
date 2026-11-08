@@ -217,7 +217,8 @@ export class FileQueue {
     const last=Date.parse(activity?.last_operation_at||job.created_at);
     return activity?.state==='staged'&&activity.next_action==='continue_pages'&&
       now-Date.parse(activity.checked_at||'')<=7*60_000&&Number.isFinite(last)&&
-      now-last>=BOOK_SILENCE_MS&&now-Date.parse(job.created_at)>=BOOK_SILENCE_MS;
+      now-last>=BOOK_SILENCE_MS&&now-Date.parse(job.model_started_at||
+        (job.status==='sent'?job.reported_at:null)||job.claimed_at||job.created_at)>=BOOK_SILENCE_MS;
   }
   #advanceBookRest() { return false; }
   observeDevice(deviceId, reportedRevision = 'unknown') {
