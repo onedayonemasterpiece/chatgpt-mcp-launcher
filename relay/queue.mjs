@@ -1022,7 +1022,7 @@ export class FileQueue {
     for(const task of this.#state.book_tasks) {
       if(task.state!=='active')continue;
       const jobs=[...this.#state.request_receipts.map(r=>r.job),...this.#state.jobs].filter(j=>j.book_task_id===task.id&&
-        ['start','continue'].includes(j.action));
+        ['start','continue'].includes(j.action)).sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at));
       const job=jobs.at(-1);
       if(!job||job.archived&&(!MODEL_FINAL.includes(job.model_status)||job.model_status==='blocked'&&!job.book_failure_reason))continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}

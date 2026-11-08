@@ -148,6 +148,7 @@ test('a pruned final book receipt still drives the existing ordinary handoff',as
     const state=JSON.parse(await readFile(f.file,'utf8'));
     const job=state.jobs.find(j=>j.id===first.job_id);
     state.jobs=state.jobs.filter(j=>j.id!==job.id);
+    state.jobs.push({...job,id:'older-live-predecessor',created_at:new Date(f.now()-60_000).toISOString(),model_status:'started'});
     if(terminal==='unknown'){job.model_status=null;job.status='needs_review';}
     const {prompt,handoff_prefix,model_summary,model_progress,...receipt}=job;
     state.request_receipts.push({device_id:job.device_id,request_id:job.request_id,
@@ -164,6 +165,8 @@ test('a pruned final book receipt still drives the existing ordinary handoff',as
       assert.equal(next?.action,'start','the existing unknown-count rollover remains unchanged');
       assert.equal(next.chat_url,null);
       assert.equal(next.book_task_id,first.job_id);assert.equal(next.book_index,0);
+      const saved=JSON.parse(await readFile(f.file,'utf8'));
+      assert.equal(saved.jobs.find(j=>j.id===next.id).request_id,'book-next-'+first.job_id,'the newest archived receipt remains authoritative over an older live predecessor');
       assert.equal((JSON.parse(await readFile(f.file,'utf8'))).request_receipts[0].job.model_status,'failed');
     }
   });
