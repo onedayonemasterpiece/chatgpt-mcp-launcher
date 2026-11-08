@@ -1093,8 +1093,9 @@ export class FileQueue {
       const stale=this.#bookSilent(task,job,now);
       const unsent=job.action==='start'&&job.status==='blocked'&&!job.model_status&&
         !job.chat_url&&!job.result_chat_url&&
-        job.message==='An unsent draft already exists; not overwriting it'&&
-        job.page_state?.url_kind==='home'&&job.page_state.composer_text==='other_draft'&&
+        ((job.proven_unsent===true&&job.page_state?.composer_text==='our_prompt')||
+          (job.message==='An unsent draft already exists; not overwriting it'&&job.page_state?.composer_text==='other_draft'))&&
+        job.page_state?.url_kind==='home'&&
         job.page_state.user_messages===0&&job.page_state.assistant_messages===0;
       const silent=unsent||(stale&&!finished)||retry||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
@@ -1286,7 +1287,7 @@ export class FileQueue {
       } else if(job.chat_url&&url&&url!==job.chat_url)url=null;
       // An unchanged own draft proves no delivery. Otherwise unknown stays
       // unknown (never recast as "nothing sent").
-      const ownDraft=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status;
+      const ownDraft=data.status==='needs_review'&&data.page_state?.composer_text==='our_prompt'&&!job.model_status&&!clientSafetyMarker(data.message);
       job.status=ownDraft?'blocked':wrongRolloverAddress?'needs_review':data.status;
       // Proven unsent: a retry cannot duplicate, so do not tell agents to stop.
       if(ownDraft) data={...data,message:'Not sent: the prompt is still in the composer. '+

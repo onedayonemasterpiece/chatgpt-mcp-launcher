@@ -106,11 +106,34 @@ test('a proven unsent draft-blocked first book start resumes without RKB activit
   assert.equal(await f.q.claim('desktop'),null,'existing replacement throttle still prevents a retry loop');
 });
 
+test('a verified own unsent first-book prompt uses the existing automatic replacement',async t=>{
+  const f=await fixture(t);const first=await f.start();
+  await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:first.job_id,status:'needs_review',
+    message:'Submitted via Enter, but delivery was not verified. Do not retry automatically.',
+    page_state:{url_kind:'home',composer:'present',composer_text:'our_prompt',user_messages:0,assistant_messages:0}});
+  assert.equal(f.q.status(first.job_id).proven_unsent,true);
+  f.advance(60_000);await f.q.tick();
+  const next=await f.q.claim('desktop');
+  assert.equal(next?.action,'start','known unsent work must not wait for twenty-minute silence');
+  assert.equal(next.book_task_id,first.job_id);
+  assert.equal(next.book_index,0);
+  assert.equal(next.chat_url,null);
+  assert.equal(f.q.status(first.job_id).status,'blocked');
+  await f.q.report('desktop',{job_id:next.id,status:'needs_review',
+    page_state:{url_kind:'home',composer:'present',composer_text:'our_prompt',user_messages:0,assistant_messages:0}});
+  f.advance(60_000);await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'the existing replacement throttle is retained');
+});
+
 test('uncertain delivery and other blocked starts never use the unsent-draft continuation',async t=>{
   for(const changed of [
     {status:'needs_review'},
+    {status:'needs_review',message:'failure_kind=client_safety_rejection. Explicit refusal',page_state:{url_kind:'home',composer_text:'our_prompt',user_messages:0,assistant_messages:0}},
     {message:'This call was blocked by OpenAI safety systems'},
     {page_state:{url_kind:'conversation',composer_text:'other_draft',user_messages:1,assistant_messages:0}},
+    {proven_unsent:true,page_state:{url_kind:'home',composer_text:'our_prompt',user_messages:0,assistant_messages:0}},
+    {status:'needs_review',page_state:{url_kind:'home',composer_text:'our_prompt',user_messages:1,assistant_messages:0}},
   ]) await t.test(JSON.stringify(changed),async t=>{
     const f=await fixture(t);await f.start();const first=await f.q.claim('desktop');
     await f.q.report('desktop',{job_id:first.id,status:'blocked',
