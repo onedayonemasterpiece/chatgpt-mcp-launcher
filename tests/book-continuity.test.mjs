@@ -17,6 +17,48 @@ const THREAD='https://mira-projects.slack.com/archives/C0C8RT9JB2P/p179286877143
 const CONTINUE='Продолжай. Сначала book_ingest(status) по указанному ingestion_id. Принятые страницы не повторяй.';
 const DEVICE='test-device-token-00000000000000000000';
 
+test('a legacy device cycle preserves work start and assigned rest for every existing window',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start([{ingestion_id:ING1}],'legacy-first');
+  const second=await f.start([{ingestion_id:ING2}],'legacy-second');
+  await f.deliver(first,CHAT);
+  await f.deliver(second,NEXT);
+  const started=f.now();
+  for(const cycle of [{started_at:started},{started_at:started,resume_at:started+90*60_000}]) {
+    const state=JSON.parse(await readFile(f.file,'utf8'));
+    state.book_cycles={desktop:cycle};
+    await writeFile(f.file,JSON.stringify(state));
+    const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0.99});
+    await restored.initialize();
+    await restored.enqueue({action:'start',prompt:'Persist migrated fixture',request_id:'persist-'+!!cycle.resume_at});
+    const saved=JSON.parse(await readFile(f.file,'utf8'));
+    assert.deepEqual(saved.book_cycles[first.job_id],cycle);
+    assert.deepEqual(saved.book_cycles[second.job_id],cycle);
+    assert.equal(saved.book_cycles.desktop,undefined);
+    assert.deepEqual(saved.jobs.slice(0,state.jobs.length),state.jobs,'migration does not fabricate job outcomes');
+    assert.deepEqual(saved.book_tasks,state.book_tasks,'migration preserves books and private prompts');
+  }
+});
+
+test('one book begins its full rest while another book finishes an issued turn',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const slow=await f.start([{ingestion_id:ING1}],'slow-rest-window');
+  const ready=await f.start([{ingestion_id:ING2}],'ready-rest-window');
+  await f.deliver(slow,CHAT);
+  await f.deliver(ready,NEXT);
+  await f.q.modelReport({job_id:slow.job_id,status:'started'});
+  await f.q.modelReport({job_id:ready.job_id,status:'done'});
+  f.advance(3*60*60_000);
+  await f.activity(slow,'processing');
+  await f.activity(ready,'staged');
+  await f.q.tick();
+  assert.equal(f.q.status(ready.job_id).book_task.rest_until,
+    new Date(f.now()+35*60_000).toISOString(),
+    'an unrelated active save must not postpone this window’s rest');
+  assert.equal(f.q.status(slow.job_id).book_task.rest_until,null,
+    'the active save must finish before its own full rest');
+});
+
 async function fixture(t,{random=Math.random}={}) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-book-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
@@ -682,85 +724,56 @@ test('late client safety report from prior book cannot stop already advanced ing
   assert.equal(newBook.book_index,1);
 });
 
-test('3h expires queued books, DEV runs, restart preserves rest and resumes each ingestion once',async t=>{
-  const f=await fixture(t,{random:()=>0.5}); // exactly 63 minutes
-  const ing4='12345678-aaaa-bbbb-cccc-dddddddddddd';
-  const ing5='87654321-aaaa-bbbb-cccc-dddddddddddd';
+test('per-window rest expires its queued successor and survives restart independently',async t=>{
+  const f=await fixture(t,{random:()=>0.5});
   const worker=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}],'rest-worker');
   const reader=await f.start([{ingestion_id:ING3}],'rest-reader');
   await f.deliver(worker,CHAT);
   await f.deliver(reader,NEXT);
-  await f.activity(worker,'staged',new Date(f.now()).toISOString(),13);
   await f.activity(reader,'staged',new Date(f.now()).toISOString(),13);
   await f.q.modelReport({job_id:worker.job_id,status:'started'});
   await f.q.modelReport({job_id:reader.job_id,status:'done'});
   f.advance(3*60*60_000-60_000);
-  const lastOperation=new Date(f.now()).toISOString();
-  await f.activity(worker,'staged',lastOperation);
-  await f.activity(reader,'staged',lastOperation);
+  await f.activity(worker,'processing');
+  await f.activity(reader);
   await f.q.tick();
-  const queuedSuccessor=f.q.status(reader.job_id).book_task.current_job_id;
-  assert.notEqual(queuedSuccessor,reader.job_id);
-  assert.equal(f.q.status(queuedSuccessor).status,'queued');
-  const queuedStart=await f.start([{ingestion_id:ing4}],'first-start-before-rest');
+  const queued=f.q.status(reader.job_id).book_task.current_job_id;
+  assert.equal(f.q.status(queued).status,'queued');
   f.advance(60_000);
-  await f.activity(worker,'finalized',new Date(f.now()).toISOString());
-  assert.equal(f.q.status(queuedSuccessor).status,'expired',
-    'status inspection at the boundary must process book rest before generic expiry');
   await f.q.tick();
-  for(const id of [queuedSuccessor,queuedStart.job_id]) {
-    assert.equal(f.q.status(id).status,'expired','book prompts expired exactly at 3h');
-    assert.match(f.q.status(id).message,/Book rest/);
-  }
-  assert.equal(f.q.status(worker.job_id).book_task.current_book_index,0,
-    'finalized-to-nextbook must not enqueue during drain');
-  assert.equal(f.q.status(worker.job_id).book_task.rest_until,null,
-    'the active first book has not completed its turn');
-  assert.equal(await f.q.claim('desktop'),null);
-  await assert.rejects(f.start([{ingestion_id:ing5}],'new-during-drain'),/Book import rest until/);
-  const dev=await f.q.enqueue({action:'start',prompt:'Normal DEV work',request_id:'dev-during-book-rest'});
-  assert.equal((await f.q.claim('desktop')).id,dev.job_id,'DEV bypasses book-only pause');
-
+  const readerResume=new Date(f.now()+63*60_000).toISOString();
+  assert.equal(f.q.status(queued).status,'expired');
+  assert.match(f.q.status(queued).message,/Book rest/);
+  assert.equal(f.q.status(reader.job_id).book_task.rest_until,readerResume);
+  assert.equal(f.q.status(worker.job_id).book_task.rest_until,null);
+  const dev=await f.q.enqueue({action:'start',prompt:'Normal DEV work',request_id:'dev-rest'});
+  assert.equal((await f.q.claim('desktop')).id,dev.job_id);
   f.advance(20*60_000);
+  await f.activity(worker,'finalized');
   await f.q.modelReport({job_id:worker.job_id,status:'done'});
   await f.q.tick();
-  const resumeAt=new Date(f.now()+63*60_000).toISOString();
-  assert.equal(f.q.status(worker.job_id).book_task.rest_until,resumeAt,
-    'all 63 rest minutes begin after the last save');
+  const workerResume=new Date(f.now()+63*60_000).toISOString();
+  assert.equal(f.q.status(worker.job_id).book_task.rest_until,workerResume);
   assert.equal(f.q.status(worker.job_id).book_task.current_book_index,0);
-  f.advance(30*60_000);
   const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0});
   await restored.initialize();
-  await restored.tick();
-  assert.equal(restored.status(reader.job_id).book_task.rest_until,resumeAt,
-    'restart does not resample or shorten the pause');
-  assert.equal(await restored.claim('desktop'),null);
-  await assert.rejects(restored.enqueue({action:'start',prompt:'Another book',request_id:'during-rest',
-    slack_thread_url:THREAD,book:{books:[{ingestion_id:ing5}],continuation_prompt:CONTINUE}}),
-    /Book import rest until/);
-
-  f.advance(33*60_000);
+  assert.equal(restored.status(reader.job_id).book_task.rest_until,readerResume);
+  assert.equal(restored.status(worker.job_id).book_task.rest_until,workerResume);
+  f.advance(43*60_000);
   await restored.bookActivity({book_task_id:reader.job_id,state:'staged',next_action:'continue_pages',
-    last_operation_at:lastOperation,accepted_pages:15,next_cursor:'42'});
+    last_operation_at:new Date(f.now()-63*60_000).toISOString(),accepted_pages:14,next_cursor:'40'});
   await restored.tick();
-  await restored.tick();
-  assert.equal(restored.status(worker.job_id).book_task.current_book_index,1,
-    'next book starts only after full rest');
-  const all=JSON.parse(await readFile(f.file,'utf8')).jobs;
-  for(const [root,ingestion] of [[worker,ING2],[reader,ING3],[queuedStart,ing4]]) {
-    const queued=all.filter(j=>j.book_task_id===root.job_id&&
-      ['start','continue'].includes(j.action)&&j.status==='queued');
-    assert.equal(queued.length,1,'one successor per ingestion, not a retry loop');
-    assert.match(queued[0].prompt,new RegExp(ingestion));
-    assert.match(queued[0].prompt,/book_ingest/);
-  }
-  const sends=[];
-  for(let i=0;i<3;i++)sends.push(await restored.claim('desktop'));
-  assert.equal(sends.filter(j=>j.book_task_id===reader.job_id).length,1,
-    'exactly one ordinary replacement of the same ING3');
-  assert.equal(sends.filter(j=>j.book_task_id===queuedStart.job_id).length,1,
-    'an expired first bookstart also resumes automatically');
+  const next=await restored.claim('desktop');
+  assert.equal(next.book_task_id,reader.job_id,'rested window resumes without waiting for the other');
+  assert.equal(next.book_index,0);
+  assert.equal(restored.status(worker.job_id).book_task.current_book_index,0);
   assert.equal(await restored.claim('desktop'),null);
+  f.advance(20*60_000);
+  await restored.tick();
+  const nextBook=await restored.claim('desktop');
+  assert.equal(nextBook.book_task_id,worker.job_id);
+  assert.equal(nextBook.book_index,1);
+  assert.equal(await restored.claim('desktop'),null,'one successor per window');
 });
 
 test('book rest chooses the inclusive 35–90 minute range',async t=>{
@@ -785,7 +798,8 @@ test('a model working 20 minutes past 3h completes before the full 35-minute res
   await f.activity(first,'staged',new Date(f.now()).toISOString());
   await f.q.tick();
   assert.equal(f.q.status(first.job_id).book_task.rest_until,null);
-  await assert.rejects(f.start([{ingestion_id:ING2}],'during-drain'),/Book import rest until/);
+  assert.equal(f.q.status(first.job_id).book_task.current_job_id,first.job_id,
+    'no successor interrupts the current issued turn');
   f.advance(20*60_000);
   await f.activity(first,'staged',new Date(f.now()).toISOString());
   await f.q.tick();
