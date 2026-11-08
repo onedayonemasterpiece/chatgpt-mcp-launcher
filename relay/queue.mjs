@@ -90,11 +90,12 @@ const BOOK_FOOTER = ' Импортируй книгу по инструкция�
   'Если OpenAI явно отклонил вызов book_ingest клиентской проверкой безопасности, вызови '+
   'chatgpt_report(status=blocked, failure_kind=client_safety_rejection, summary=точный текст отказа; '+
   'без поля failure_kind начни summary с "failure_kind=client_safety_rejection. "). Ходы в Slack не публикуй.';
+// The caller's prompt texts are not forwarded: import must work from MCP instructions alone.
 const bookPrompt=(task,index)=>{
   const selector=task.books[index];
   return '(Книга '+(index+1)+' из '+task.books.length+': '+(selector.title?'«'+selector.title+'», ':'')+'ingestion_id='+selector.ingestion_id+
     (selector.telegram_original?', telegram_original='+selector.telegram_original:'')+
-    '. Сначала book_ingest(status) по этому ingestion_id.)\n\n'+task.continuation_prompt;
+    '. Сначала book_ingest(status) по этому ingestion_id.)';
 };
 
 // One plain instruction per state, so a calling agent always knows what to do next.
@@ -376,7 +377,6 @@ export class FileQueue {
       const book=args.book;
       if(book!==undefined) {
         if(action!=='start')throw Error('book is only accepted by chatgpt_start');
-        requireString(book.continuation_prompt,'book.continuation_prompt',MAX_PROMPT);
         if(!Array.isArray(book.books)||book.books.length<1||book.books.length>32)
           throw Error('book.books must contain 1-32 ordered ingestion selectors');
         for(const selector of book.books) {
@@ -390,7 +390,7 @@ export class FileQueue {
         }
         if(new Set(book.books.map(x=>x.ingestion_id)).size!==book.books.length)
           throw Error('Duplicate ingestion_id in book list');
-        prompt=bookPrompt({books:book.books,continuation_prompt:prompt},0);
+        prompt=bookPrompt({books:book.books},0);
       }
       // Default keeps the level already selected in ChatGPT (it remembers the last one).
       const effort=noPrompt?null:(args.effort??'auto');
@@ -964,7 +964,8 @@ export class FileQueue {
       if(t.state!=='active'&&!t.notice_sent_at)
         return [...failures,{...shared,kind:'terminal',notice_id:t.id}];
       if(t.state==='active'&&t.no_progress_alert_id&&t.no_progress_notified_id!==t.no_progress_alert_id)
-        return [...failures,{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id}];
+        // Earlier books' outcomes belong to the terminal notice, not to a warning about the current book.
+        return [...failures,{...shared,kind:'no_progress',notice_id:t.no_progress_alert_id,terminal_summary:null}];
       return failures;
     });
   }
@@ -981,6 +982,11 @@ export class FileQueue {
       else throw Error('Obsolete book notice');
       await this.#save();
     });
+  }
+  // A single client refusal gets one honest retry in a new chat; a repeated one ends the book.
+  #safetyRefusals(task) {
+    return this.#state.jobs.filter(j=>j.book_task_id===task.id&&j.book_index===task.index&&
+      ['start','continue'].includes(j.action)&&j.model_status==='blocked'&&clientSafetyMarker(j.model_summary));
   }
   async #recordBookSafetyFailure(task,source,summary,now) {
     if(source.book_failure_reason)return;
@@ -1013,8 +1019,10 @@ export class FileQueue {
       const job=jobs.at(-1);
       if(!job)continue;
       if(task.job_id!==job.id){task.job_id=job.id;changed=true;}
-      const refusal=jobs.find(j=>j.book_index===task.index&&j.model_status==='blocked'&&
-        (clientSafetyMarker(j.model_summary)||j.book_failure_reason==='client_safety_rejection'));
+      const refusals=this.#safetyRefusals(task);
+      const refusal=refusals[1]||jobs.find(j=>j.book_index===task.index&&j.book_failure_reason==='client_safety_rejection');
+      const retry=!refusal&&refusals.length===1&&job===refusals[0]&&
+        now-Date.parse(job.model_finished_at||job.model_last_report_at||job.created_at)>=BOOK_SILENCE_MS;
       if(refusal) {
         await this.#recordBookSafetyFailure(task,refusal,refusal.model_summary,now);
         changed=true;
@@ -1076,7 +1084,7 @@ export class FileQueue {
         job.message==='An unsent draft already exists; not overwriting it'&&
         job.page_state?.url_kind==='home'&&job.page_state.composer_text==='other_draft'&&
         job.page_state.user_messages===0&&job.page_state.assistant_messages===0;
-      const silent=unsent||(stale&&!finished)||
+      const silent=unsent||(stale&&!finished)||retry||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       if(this.#bookPaused(task.id,now))continue;
@@ -1093,6 +1101,8 @@ export class FileQueue {
             request_id:'book-next-'+job.id,book_task_id:task.id,book_index:task.index,
             book_accepted_pages_at_creation:activity?.accepted_pages??null,book_replacement:replacement,
             book_stale:silent,[BOOK_INTERNAL]:true});
+          if(retry)console.log(JSON.stringify({event:'book_safety_retry',book_task_id:task.id,
+            refused_job_id:job.id,job_id:next.job_id,ingestion_id:task.books[task.index].ingestion_id}));
           task.job_id=next.job_id;task.last_enqueue_error=null;
           if(replacement)task.last_replacement_at=new Date(now).toISOString();
           changed=true;
@@ -1128,11 +1138,14 @@ export class FileQueue {
         if(ongoing) job.model_progress=data.summary.slice(0,500);
         else job.model_summary=data.summary.slice(0,MAX_REPLY);
       }
+      if(data.failure_kind==='client_safety_rejection'&&!clientSafetyMarker(job.model_summary))
+        job.model_summary='failure_kind=client_safety_rejection. '+job.model_summary;
       if(data.failure_kind==='client_safety_rejection'||
         (data.status==='blocked'&&clientSafetyMarker(data.summary))) {
         const task=this.#state.book_tasks.find(t=>t.id===job.book_task_id&&
           t.state==='active'&&t.index===job.book_index);
-        if(task) await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
+        if(task&&this.#safetyRefusals(task).length>1)
+          await this.#recordBookSafetyFailure(task,job,data.summary,this.now());
       }
       // The conversation answering is proof the prompt arrived: no more uncertainty.
       if(['claimed','needs_review','failed'].includes(job.status)) {
