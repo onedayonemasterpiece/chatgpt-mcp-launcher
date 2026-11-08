@@ -40,24 +40,6 @@ test('a legacy device cycle preserves work start and assigned rest for every exi
   }
 });
 
-test('one book begins its full rest while another book finishes an issued turn',async t=>{
-  const f=await fixture(t,{random:()=>0});
-  const slow=await f.start([{ingestion_id:ING1}],'slow-rest-window');
-  const ready=await f.start([{ingestion_id:ING2}],'ready-rest-window');
-  await f.deliver(slow,CHAT);
-  await f.deliver(ready,NEXT);
-  await f.q.modelReport({job_id:slow.job_id,status:'started'});
-  await f.q.modelReport({job_id:ready.job_id,status:'done'});
-  f.advance(3*60*60_000);
-  await f.activity(slow,'processing');
-  await f.activity(ready,'staged');
-  await f.q.tick();
-  assert.equal(f.q.status(ready.job_id).book_task.rest_until,
-    new Date(f.now()+35*60_000).toISOString(),
-    'an unrelated active save must not postpone this window’s rest');
-  assert.equal(f.q.status(slow.job_id).book_task.rest_until,null,
-    'the active save must finish before its own full rest');
-});
 
 async function fixture(t,{random=Math.random}={}) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-book-'));
@@ -724,115 +706,9 @@ test('late client safety report from prior book cannot stop already advanced ing
   assert.equal(newBook.book_index,1);
 });
 
-test('per-window rest expires its queued successor and survives restart independently',async t=>{
-  const f=await fixture(t,{random:()=>0.5});
-  const worker=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}],'rest-worker');
-  const reader=await f.start([{ingestion_id:ING3}],'rest-reader');
-  await f.deliver(worker,CHAT);
-  await f.deliver(reader,NEXT);
-  await f.activity(reader,'staged',new Date(f.now()).toISOString(),13);
-  await f.q.modelReport({job_id:worker.job_id,status:'started'});
-  await f.q.modelReport({job_id:reader.job_id,status:'done'});
-  f.advance(3*60*60_000-60_000);
-  await f.activity(worker,'processing');
-  await f.activity(reader);
-  await f.q.tick();
-  const queued=f.q.status(reader.job_id).book_task.current_job_id;
-  assert.equal(f.q.status(queued).status,'queued');
-  f.advance(60_000);
-  await f.q.tick();
-  const readerResume=new Date(f.now()+63*60_000).toISOString();
-  assert.equal(f.q.status(queued).status,'expired');
-  assert.match(f.q.status(queued).message,/Book rest/);
-  assert.equal(f.q.status(reader.job_id).book_task.rest_until,readerResume);
-  assert.equal(f.q.status(worker.job_id).book_task.rest_until,null);
-  const dev=await f.q.enqueue({action:'start',prompt:'Normal DEV work',request_id:'dev-rest'});
-  assert.equal((await f.q.claim('desktop')).id,dev.job_id);
-  f.advance(20*60_000);
-  await f.activity(worker,'finalized');
-  await f.q.modelReport({job_id:worker.job_id,status:'done'});
-  await f.q.tick();
-  const workerResume=new Date(f.now()+63*60_000).toISOString();
-  assert.equal(f.q.status(worker.job_id).book_task.rest_until,workerResume);
-  assert.equal(f.q.status(worker.job_id).book_task.current_book_index,0);
-  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0});
-  await restored.initialize();
-  assert.equal(restored.status(reader.job_id).book_task.rest_until,readerResume);
-  assert.equal(restored.status(worker.job_id).book_task.rest_until,workerResume);
-  f.advance(43*60_000);
-  await restored.bookActivity({book_task_id:reader.job_id,state:'staged',next_action:'continue_pages',
-    last_operation_at:new Date(f.now()-63*60_000).toISOString(),accepted_pages:14,next_cursor:'40'});
-  await restored.tick();
-  const next=await restored.claim('desktop');
-  assert.equal(next.book_task_id,reader.job_id,'rested window resumes without waiting for the other');
-  assert.equal(next.book_index,0);
-  assert.equal(restored.status(worker.job_id).book_task.current_book_index,0);
-  assert.equal(await restored.claim('desktop'),null);
-  f.advance(20*60_000);
-  await restored.tick();
-  const nextBook=await restored.claim('desktop');
-  assert.equal(nextBook.book_task_id,worker.job_id);
-  assert.equal(nextBook.book_index,1);
-  assert.equal(await restored.claim('desktop'),null,'one successor per window');
-});
 
-test('book rest chooses the inclusive 35–90 minute range',async t=>{
-  for(const [index,random,minutes] of [[0,()=>0,35],[1,()=>0.999999,90]]) {
-    const f=await fixture(t,{random});
-    const first=await f.start([{ingestion_id:ING1}],'bounds-'+index);
-    await f.deliver(first);
-    await f.q.modelReport({job_id:first.job_id,status:'done'});
-    f.advance(3*60*60_000);
-    await f.q.tick();
-    assert.equal(f.q.status(first.job_id).book_task.rest_until,
-      new Date(f.now()+minutes*60_000).toISOString());
-  }
-});
 
-test('a model working 20 minutes past 3h completes before the full 35-minute rest',async t=>{
-  const f=await fixture(t,{random:()=>0});
-  const first=await f.start([{ingestion_id:ING1}],'late-reader');
-  await f.deliver(first);
-  await f.q.modelReport({job_id:first.job_id,status:'started'});
-  f.advance(3*60*60_000);
-  await f.activity(first,'staged',new Date(f.now()).toISOString());
-  await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,null);
-  assert.equal(f.q.status(first.job_id).book_task.current_job_id,first.job_id,
-    'no successor interrupts the current issued turn');
-  f.advance(20*60_000);
-  await f.activity(first,'staged',new Date(f.now()).toISOString());
-  await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,null);
-  await f.q.modelReport({job_id:first.job_id,status:'done'});
-  await f.q.tick();
-  const resumeAt=new Date(f.now()+35*60_000).toISOString();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,resumeAt);
-  f.advance(10*60_000);
-  const restarted=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0.99999});
-  await restarted.initialize();
-  await restarted.tick();
-  assert.equal(restarted.status(first.job_id).book_task.rest_until,resumeAt);
-});
 
-test('processing/wait stays active after deadline; staged plus real 20m RKB silence permits full rest',async t=>{
-  const f=await fixture(t,{random:()=>0});
-  const first=await f.start([{ingestion_id:ING1}],'processing-reader');
-  await f.deliver(first);
-  await f.q.modelReport({job_id:first.job_id,status:'started'});
-  const originalOperation=new Date(f.now()).toISOString();
-  await f.activity(first,'processing',originalOperation);
-  f.advance(3*60*60_000+21*60_000);
-  await f.activity(first,'processing',originalOperation);
-  await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,
-    'processing/wait must not be treated as a dead window');
-  assert.equal(await f.q.claim('desktop'),null,'deadline already prevents new book work');
-  await f.activity(first,'staged',originalOperation);
-  await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,
-    new Date(f.now()+35*60_000).toISOString(),'RKB settled and silent starts rest without browser Stop');
-});
 
 
 test('silent registered reader is replaced without browser Stop or manual reconciliation',async t=>{
@@ -851,20 +727,6 @@ test('silent registered reader is replaced without browser Stop or manual reconc
   assert.equal(saved.jobs.some(j=>j.action==='book_stop'||j.action==='reconcile'||j.action==='read'),false);
 });
 
-test('rest starts from RKB silence without Stop and resumes automatically after restart',async t=>{
-  const f=await fixture(t,{random:()=>0});
-  const first=await f.start();await f.deliver(first);
-  await f.q.modelReport({job_id:first.job_id,status:'started'});
-  await f.activity(first);f.advance(3*60*60_000);
-  await f.activity(first,'staged',new Date(f.now()-20*60_000).toISOString());
-  await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
-  assert.equal(await f.q.claim('desktop'),null);
-  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,random:()=>0});await restored.initialize();
-  f.advance(35*60_000);await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',last_operation_at:new Date(f.now()-55*60_000).toISOString(),accepted_pages:14,next_cursor:'40'});
-  await restored.tick();const next=await restored.claim('desktop');
-  assert.equal(next?.action,'start');assert.equal(next.book_task_id,first.job_id);
-});
 
 
 test('recent activity and pending RKB save never create a replacement or browser probe',async t=>{
@@ -925,19 +787,26 @@ test('an undelivered initial reader with zero RKB operations recovers without an
   }
 });
 
-test('finalized book does not let an unconfirmed predecessor block device rest',async t=>{
-  const f=await fixture(t,{random:()=>0});
-  const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}],'rest-finalized-predecessor');
-  await f.deliver(first);await f.q.modelReport({job_id:first.job_id,status:'started'});
-  const old=new Date(f.now()).toISOString();f.advance(21*60_000);
-  await f.activity(first,'staged',old);await f.q.tick();
-  const successor=await f.q.claim('desktop');
-  await f.q.report('desktop',{job_id:successor.id,status:'sent',chat_url:NEXT});
-  await f.q.modelReport({job_id:successor.id,status:'done'});
-  f.advance(3*60*60_000);
-  await f.activity(first,'finalized');await f.q.tick();
-  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
-  assert.equal(await f.q.claim('desktop'),null,'next book respects the full rest');
-  f.advance(35*60_000);await f.q.tick();
-  const next=await f.q.claim('desktop');assert.equal(next.action,'start');assert.match(next.own_text,new RegExp(ING2));
+
+
+test('owner suspension ignores assigned rests without changing jobs, prompts or cycle clocks',async t=>{
+  const f=await fixture(t);
+  const first=await f.start();await f.deliver(first);await f.activity(first);
+  await f.q.modelReport({job_id:first.job_id,status:'done'});
+  const saved=JSON.parse(await readFile(f.file,'utf8'));
+  const cycle={started_at:f.now()-4*60*60_000,resume_at:f.now()+90*60_000};
+  saved.book_cycles[first.job_id]=cycle;
+  await writeFile(f.file,JSON.stringify(saved));
+  const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
+  assert.equal(restored.status(first.job_id).book_task.rest_until,null);
+  await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+    last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
+  await restored.tick();
+  const next=await restored.claim('desktop');
+  assert.equal(next.book_task_id,first.job_id);assert.equal(next.action,'continue');
+  const after=JSON.parse(await readFile(f.file,'utf8'));
+  assert.deepEqual(after.book_cycles[first.job_id],cycle,'owner suspension does not reset cycle history');
+  assert.equal(after.book_tasks[0].continuation_prompt,saved.book_tasks[0].continuation_prompt);
+  assert.deepEqual(after.book_tasks[0].books,saved.book_tasks[0].books);
+  assert.deepEqual(after.jobs.find(j=>j.id===first.job_id),saved.jobs.find(j=>j.id===first.job_id));
 });
