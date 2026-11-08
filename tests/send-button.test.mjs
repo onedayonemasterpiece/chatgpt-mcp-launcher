@@ -94,6 +94,16 @@ test('ping submits using a unique composer Send button exactly once',async()=>{
  assert.equal(f.state.unrelatedClicks,0);
 });
 
+test('a late Send button is clicked once after the initial Enter was ignored',async()=>{
+ const f=fixture({noForm:true,delayedButtonPolls:80});
+ const result=await f.run({action:'start',prompt:'late hydrated send',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.enters,1,'preserve the existing single early Enter');
+ assert.equal(f.state.clicks,1,'click the eventual Send button once');
+ assert.equal(f.state.insertions,1,'never reinsert or duplicate the draft');
+ assert.equal(f.state.unrelatedClicks,0);
+});
+
 test('verified text succeeds even if execCommand returns false',async()=>{
  const f=fixture({commandResult:false});
  const result=await f.run({action:'start',prompt:'verified input'});
