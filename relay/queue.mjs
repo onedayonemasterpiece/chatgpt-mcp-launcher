@@ -915,7 +915,9 @@ export class FileQueue {
       if(stamp&&unchanged&&state==='staged'&&current?.status==='sent'&&
         !MODEL_FINAL.includes(current.model_status)&&!current.page_completed_at&&
         task.activity.accepted_pages>current.book_accepted_pages_at_creation&&
-        !this.#bookSilent(task,current,this.now())&&!this.#bookPaused(task.id,this.now()))
+        !this.#bookSilent(task,current,this.now())&&!this.#bookPaused(task.id,this.now())&&
+        !this.#state.jobs.some(job=>job.reconcile_of===current.id&&
+          Date.parse(job.created_at)>this.now()-5*60_000))
         await this.#enqueue({action:'reconcile',job_id:current.id,device_id:task.device_id,
           request_id:'book-observe-'+current.id+'-'+task.activity.checked_at,[BOOK_INTERNAL]:true});
       await this.#save();
@@ -941,6 +943,7 @@ export class FileQueue {
             ['start','continue'].includes(j.action)&&!this.#bookTurnReleased(j)))continue;
           const previous=history.findLast(j=>j.action==='close'&&j.book_task_id===task.id&&j.chat_url===url);
           if(previous&&(['queued','claimed','closed'].includes(previous.status)||
+            Date.parse(previous.created_at)>this.now()-5*60_000||
             (previous.status==='blocked'&&/unsent draft|inspection failed/.test(previous.message||''))))continue;
           try {
             await this.#enqueue({action:'close',chat_url:url,device_id:task.device_id,

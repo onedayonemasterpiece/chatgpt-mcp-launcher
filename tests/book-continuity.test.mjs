@@ -309,6 +309,9 @@ test('retired book tabs close after confirmed replacement or finalization, with 
   await f.q.report('desktop',{job_id:close.id,status:'blocked',chat_url:CHAT,message:'ChatGPT still answering'});
   const recovered=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});
   await recovered.initialize();
+  f.advance(60_000);await recovered.closeRetiredBookChats();
+  assert.equal(await recovered.claim('desktop'),null,'minute metadata polls do not increase busy-tab close retries');
+  f.advance(4*60_000);
   await recovered.closeRetiredBookChats();
   const retry=await recovered.claim('desktop');
   assert.equal(retry.action,'close');
@@ -537,6 +540,34 @@ test('existing relay timer invokes injected RKB test double only for active inge
   await new Promise(resolve=>setTimeout(resolve,120));
   assert.deepEqual(calls,[ING1],'only one activity poll in initial five-minute interval');
   assert.equal(queue.status(first.job_id).book_task.activity_state,'staged');
+});
+
+test('existing relay poll discovers finalization within a minute without a model callback',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'launcher-minute-progress-'));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  let now=Date.now(),finalized=false,calls=0;
+  t.mock.method(Date,'now',()=>now);
+  const {queue,server}=await makeRelay({file:join(dir,'state.json'),mcpToken:'mcp-'.repeat(9),
+    devices:{desktop:DEVICE},tickMs:15,deliveryMs:100_000,bookNotifier:null,
+    bookActivityReader:async ingestion_id=>{
+      calls++;
+      return {state:finalized&&ingestion_id===ING1?'finalized':'staged',
+        next_action:finalized&&ingestion_id===ING1?'done':'continue_pages',
+        last_operation_at:new Date(now).toISOString(),accepted_pages:2,next_cursor:'5'};
+    }});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const first=await queue.enqueue({action:'start',prompt:'Import',request_id:'minute-progress',
+    slack_thread_url:THREAD,book:{books:[{ingestion_id:ING1},{ingestion_id:ING2}],continuation_prompt:CONTINUE}});
+  await queue.claim('desktop');await queue.report('desktop',{job_id:first.job_id,status:'sent',chat_url:CHAT});
+  await queue.modelReport({job_id:first.job_id,status:'started'});
+  for(let i=0;i<30&&!calls;i++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls,1);
+  now+=60_001;finalized=true;
+  for(let i=0;i<30&&queue.status(first.job_id).book_task.current_book_index!==1;i++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(calls,2,'the existing timer must refresh progress after one minute');
+  assert.equal(queue.status(first.job_id).book_task.current_book_index,1);
+  assert.equal(queue.status(first.job_id).model_status,'started','no terminal model callback is invented');
 });
 
 test('a completed book report refreshes stale activity before another continuation',async t=>{
@@ -864,6 +895,8 @@ test('a settled book poll observes exact completion before the silence handoff',
   assert.equal(await f.q.claim('desktop'),null,'an unfinished answer never permits a second writer');
   assert.equal(f.q.status(first.job_id).page_completed_at,undefined);
   f.advance(60_000);await f.activity(first,'staged',last,15);
+  assert.equal(await f.q.claim('desktop'),null,'minute metadata polls must not increase Chrome observation cadence');
+  f.advance(4*60_000);await f.activity(first,'staged',last,15);
   const finished=await f.q.claim('desktop');assert.equal(finished?.action,'reconcile');
   f.advance(1_000);
   await f.q.report('desktop',{job_id:finished.id,status:'read',chat_url:CHAT,
