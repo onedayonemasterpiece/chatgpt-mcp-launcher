@@ -219,7 +219,7 @@ export async function makeRelay({file, mcpToken, devices, sender=webhookSender()
     if(bookTicking)return;
     bookTicking=true;
     try {
-      const pollBooks=bookActivityReader&&Date.now()-bookPolledAt>=5*60_000;
+      const pollBooks=bookActivityReader&&Date.now()-bookPolledAt>=60_000;
       if(pollBooks) {
         bookPolledAt=Date.now();
         for(const book of queue.activeBooks()) {
