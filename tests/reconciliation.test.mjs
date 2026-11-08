@@ -242,10 +242,10 @@ test('read exposes categorical page state even when conversation messages are un
 function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,noComposer=false,measureWaits=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden='',
-                  stop=false,stopNoEffect=false,newerUser=false,documentState='complete',banner=''}={}) {
+                  stop=false,stopNoEffect=false,newerUser=false,documentState='complete',banner='',probeCounts={}}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
     innerText:draft,textContent:draft,isConnected:true,
-    getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null};
+    getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null,closest:()=>null};
   const editableSelector='[contenteditable],textarea,input,[role="textbox"],[role="searchbox"]';
   const rect=hidden=>hidden?{width:0,height:0}:{width:300,height:40};
   const leaf=(value,{hidden=false,editable=false}={})=>({
@@ -290,6 +290,7 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
   const document={
     title:'Private fixture title',readyState:documentState,body:{innerText:banner+' Private fixture body'},
     querySelectorAll(selector){
+      if(Object.hasOwn(probeCounts,selector))return Array.from({length:probeCounts[selector]},()=>({getAttribute:()=>null}));
       if(selector==='[contenteditable="true"],textarea')
         return noComposer?[]:ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
@@ -353,6 +354,25 @@ test('ordinary reconciliation retains existing categorical page state without pr
     assert.equal(q.status(check.id).page_state.composer,state.composer);
     assert.equal(q.status(original.id).page_completed_at,undefined);
   }
+});
+test('ordinary reconcile exposes existing markup counts without treating alternate markup as completion',async t=>{
+  const result=await inspect({main:'job_id='+ID,measureWaits:true,
+    probeCounts:{'[data-turn="user"]':3,'[data-turn="assistant"]':3,'article':6}});
+  assert.ok(result.dom_probe,'existing selector counts must reach an ordinary reconcile receipt');
+  assert.equal(result.dom_probe.counts.author_user,0);
+  assert.equal(result.dom_probe.counts.author_assistant,0);
+  assert.equal(result.dom_probe.counts.turn_user,3);
+  assert.equal(result.dom_probe.counts.turn_assistant,3);
+  assert.equal(result.dom_probe.counts.article,6);
+  assert.equal(result.evidence_kind,'conversation_marker');
+  assert.equal(result.execution_evidence,'unknown','counts never replace exact adjacent assistant proof');
+  assert.equal(result.waitCalls,0);
+  assert.equal(JSON.stringify(result).includes('Private fixture'),false);
+  const {q}=await setup(t);const original=await ambiguous(q);
+  const check=await q.reconcile(original.id,'existing-dom-probe');await q.claim('desktop');
+  await q.report('desktop',{job_id:check.id,...result});
+  assert.equal(q.status(check.id).dom_probe.counts.turn_assistant,3);
+  assert.equal(q.status(original.id).page_completed_at,undefined);
 });
 test('book-only Stop clicks only the exact latest running turn; unknown outcome never passes',async()=>{
   const marker='job_id='+ID;
