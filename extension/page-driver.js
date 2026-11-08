@@ -463,7 +463,7 @@
     const answer=turns[index+1];
     const complete=index>=0 && answer?.getAttribute?.('data-message-author-role')==='assistant' &&
       renderedOutsideEditors(answer,text=>!!text.trim()) && !replyInProgress();
-    return {status:'read',chat_url:url,page_state:pageState(job),
+    return {status:'read',chat_url:url,page_state:pageState(job),dom_probe:domProbe(),
       delivery_evidence:evidence_kind==='unconfirmed'?'unknown':'sent',evidence_kind,
       execution_evidence:complete?'page_completed':'unknown',
       message:complete?'Assistant reply after this job marker is complete (page evidence only)':
