@@ -157,6 +157,16 @@ test('current book queue time does not consume its browser execution lease',asyn
   assert.equal(f.q.status(book.job_id).status,'needs_review','an unreported send remains unknown after the original claim timeout');
 });
 
+test('queue wait does not consume a delivered reader silence interval',async t=>{
+  const f=await fixture(t);const first=await f.start();const queuedAt=f.now();
+  f.advance(16*60_000);await f.deliver(first);await f.q.modelReport({job_id:first.job_id,status:'started'});
+  f.advance(5*60_000);await f.activity(first,'staged',new Date(queuedAt).toISOString(),0);
+  await f.q.tick();assert.equal(await f.q.claim('desktop'),null,'a freshly started reader must not get a premature replacement');
+  f.advance(15*60_000);await f.activity(first,'staged',new Date(queuedAt).toISOString(),0);
+  await f.q.tick();const next=await f.q.claim('desktop');
+  assert.ok(next);assert.notEqual(next.id,first.job_id);assert.equal(next.book_task_id,first.job_id);
+});
+
 test('queue compaction retains the active book current final receipt',async t=>{
   const f=await fixture(t);const first=await f.start();await f.deliver(first);
   await f.q.modelReport({job_id:first.job_id,status:'failed',summary:'Local schema failure'});
