@@ -842,6 +842,42 @@ test('owner suspension ignores assigned rests without changing jobs, prompts or 
   assert.deepEqual(after.jobs.find(j=>j.id===first.job_id),saved.jobs.find(j=>j.id===first.job_id));
 });
 
+
+test('a settled book poll observes exact completion before the silence handoff',async t=>{
+  const f=await fixture(t);const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  await f.activity(first);
+  f.advance(5_000);const last=new Date(f.now()).toISOString();
+  await f.activity(first,'staged',last,15);
+  assert.equal(await f.q.claim('desktop'),null,'new activity does not probe a busy reader');
+  await assert.rejects(f.q.reconcile(first.job_id,'manual-early'),/needs_review|unconfirmed/i,
+    'the public reconciliation admission is unchanged');
+  f.advance(60_000);await f.activity(first,'staged',last,15);
+  const busy=await f.q.claim('desktop');
+  assert.equal(busy?.action,'reconcile','ordinary unchanged poll reuses read-only observation');
+  assert.equal(busy.reconcile_of,first.job_id);
+  f.advance(60_000);await f.activity(first,'staged',last,15);
+  assert.equal(await f.q.claim('desktop'),null,'pending observation is not duplicated');
+  await f.q.report('desktop',{job_id:busy.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'unknown'});
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'an unfinished answer never permits a second writer');
+  assert.equal(f.q.status(first.job_id).page_completed_at,undefined);
+  f.advance(60_000);await f.activity(first,'staged',last,15);
+  const finished=await f.q.claim('desktop');assert.equal(finished?.action,'reconcile');
+  f.advance(1_000);
+  await f.q.report('desktop',{job_id:finished.id,status:'read',chat_url:CHAT,
+    delivery_evidence:'sent',evidence_kind:'user_message_marker',execution_evidence:'page_completed'});
+  await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'completion still requires a fresh RKB activity snapshot');
+  f.advance(60_000);await f.activity(first,'staged',last,15);
+  await f.q.tick();const next=await f.q.claim('desktop');
+  assert.equal(next?.action,'continue');assert.equal(next.chat_url,CHAT);
+  assert.equal(next.book_task_id,first.job_id);assert.equal(next.book_index,0);
+  assert.equal(f.q.status(first.job_id).model_status,'started','DOM proof does not fabricate a model callback');
+  assert.ok(f.q.status(first.job_id).page_completed_at);
+});
+
 test('a single refusal is retried once; progress after the retry keeps the book without notices',async t=>{
   const f=await fixture(t);
   const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);
