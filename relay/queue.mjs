@@ -451,7 +451,7 @@ export class FileQueue {
         this.#bookPaused(args.book_task_id))
         throw Error('Book import rest until '+(this.#restUntil(args.book_task_id)||
           'current turns finish, followed by a full 35–90 minute pause'));
-      if(action==='reconcile' && reviewSource.status!=='needs_review' &&
+      if(action==='reconcile' && !internalBook && reviewSource.status!=='needs_review' &&
         !(reviewSource.status==='sent'&&this.#execution(reviewSource)==='unconfirmed'))
         throw Error('Reconciliation requires needs_review delivery or unconfirmed execution; inspect the original job');
       this.#advanceBookRest(this.now());
@@ -895,6 +895,7 @@ export class FileQueue {
       const stamp=data.last_operation_at==null?null:safeDate(data.last_operation_at);
       if(data.last_operation_at!=null&&!stamp)throw Error('Invalid RKB last_operation_at');
       const previous=task.activity?.last_operation_at||null;
+      const unchanged=stamp===previous&&data.accepted_pages===task.activity?.accepted_pages;
       if(Number.isInteger(data.accepted_pages)&&Number.isInteger(task.activity?.accepted_pages)&&
         data.accepted_pages>task.activity.accepted_pages) {
         task.no_progress_new_chats=0;
@@ -909,6 +910,14 @@ export class FileQueue {
         accepted_pages:Number.isInteger(data.accepted_pages)?data.accepted_pages:(task.activity?.accepted_pages??null),
         next_cursor:typeof data.next_cursor==='string'?data.next_cursor:null,
         checked_at:new Date(this.now()).toISOString()};
+      // Reuse exact-turn DOM completion proof; no callback is invented and
+      // an unfinished answer never releases the existing reader.
+      if(stamp&&unchanged&&state==='staged'&&current?.status==='sent'&&
+        !MODEL_FINAL.includes(current.model_status)&&!current.page_completed_at&&
+        task.activity.accepted_pages>current.book_accepted_pages_at_creation&&
+        !this.#bookSilent(task,current,this.now())&&!this.#bookPaused(task.id,this.now()))
+        await this.#enqueue({action:'reconcile',job_id:current.id,device_id:task.device_id,
+          request_id:'book-observe-'+current.id+'-'+task.activity.checked_at,[BOOK_INTERNAL]:true});
       await this.#save();
       return this.#bookPublic(task);
     });
