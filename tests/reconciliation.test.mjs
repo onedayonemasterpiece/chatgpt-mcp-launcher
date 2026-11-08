@@ -242,7 +242,7 @@ test('read exposes categorical page state even when conversation messages are un
 function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,noComposer=false,measureWaits=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden='',
-                  stop=false,stopNoEffect=false,newerUser=false}={}) {
+                  stop=false,stopNoEffect=false,newerUser=false,documentState='complete',banner=''}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
     innerText:draft,textContent:draft,isConnected:true,
     getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null};
@@ -288,12 +288,14 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
   const stopButton={isConnected:true,getBoundingClientRect:()=>rect(false),
     click:()=>{stopClicks++;if(!stopNoEffect)stopVisible=false;}};
   const document={
+    title:'Private fixture title',readyState:documentState,body:{innerText:banner+' Private fixture body'},
     querySelectorAll(selector){
       if(selector==='[contenteditable="true"],textarea')
         return noComposer?[]:ambiguousComposer?[editor,another]:[editor];
       if(selector==='main')return noMain?[]:[mainNode];
       if(selector==='[data-message-author-role="user"]')
         return [...(user||userEditable||userHidden?[userNode]:[]),...(newerUser?[extraUser]:[])];
+      if(selector==='[data-message-author-role="assistant"]')return assistant?[assistantNode]:[];
       if(selector==='[data-message-author-role="user"],[data-message-author-role="assistant"]')
         return [...(user||userEditable||userHidden?[userNode]:[]),...(newerUser?[extraUser]:[]),
           ...(assistant?[assistantNode]:[])];
@@ -328,6 +330,28 @@ test('read-only reconcile finds visible user marker immediately without a compos
     assert.equal(result.delivery_evidence,'unknown',JSON.stringify(sample));
     assert.equal(result.evidence_kind,'unconfirmed');
     assert.equal(result.waitCalls,0,'negative proof must also return without waiting');
+  }
+});
+test('ordinary reconciliation retains existing categorical page state without private text or waiting',async t=>{
+  for(const [sample,expected] of [
+    [{noComposer:true,documentState:'loading'},['missing','loading',0,0,false]],
+    [{user:'No marker',assistant:'Private fixture reply'},['present','complete',1,1,false]],
+    [{user:'job_id='+ID,assistant:'Private fixture reply',generating:true},['present','complete',1,1,true]],
+    [{draft:'Private fixture draft',banner:'Connection lost'},['present','complete',0,0,false]],
+  ]) {
+    const result=await inspect({...sample,measureWaits:true});
+    assert.ok(result.page_state,'the existing page-state transport must not lose reconcile observations');
+    const state=result.page_state;
+    assert.deepEqual([state.composer,state.document_state,state.user_messages,state.assistant_messages,state.answering],expected);
+    assert.equal(state.connection_lost,!!sample.banner);
+    assert.equal(result.execution_evidence,'unknown','categorical state never proves completion');
+    assert.equal(result.waitCalls,0);
+    assert.equal(JSON.stringify(result).includes('Private fixture'),false);
+    const {q}=await setup(t);const original=await ambiguous(q);
+    const check=await q.reconcile(original.id,'state');await q.claim('desktop');
+    await q.report('desktop',{job_id:check.id,...result});
+    assert.equal(q.status(check.id).page_state.composer,state.composer);
+    assert.equal(q.status(original.id).page_completed_at,undefined);
   }
 });
 test('book-only Stop clicks only the exact latest running turn; unknown outcome never passes',async()=>{
