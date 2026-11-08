@@ -378,14 +378,14 @@
         // ChatGPT empties the composer at once when it sends. If our prompt is
         // still there after a few seconds, Enter was ignored and nothing went
         // out, so one click on the Send button cannot duplicate anything.
-        for(let i=0;i<20;i++) {
+        for(let i=0;i<480;i++) {
           await sleep(250);
           const now=composer();
           if(!now || !promptFirst(draftText(now),job.prompt)) break;
-          if(i===19) {
+          if(i>=19) {
             const button=submitButton(now);
             if(expired())return expiryResult();
-            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';}
+            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';break;}
           }
         }
       } else {
