@@ -63,6 +63,41 @@ async function refusedOnce(f,taskId,jobId) {
   return retry;
 }
 
+test('a proven unsent draft-blocked first book start resumes without RKB activity',async t=>{
+  const f=await fixture(t);const first=await f.start();
+  const claimed=await f.q.claim('desktop');
+  await f.q.report('desktop',{job_id:claimed.id,status:'blocked',
+    message:'An unsent draft already exists; not overwriting it',
+    page_state:{url_kind:'home',composer:'present',composer_text:'other_draft',user_messages:0,assistant_messages:0}});
+  f.advance(5*60_000);await f.q.tick();
+  const next=await f.q.claim('desktop');
+  assert.equal(next?.action,'start');
+  assert.equal(next.book_task_id,first.job_id);
+  assert.equal(next.book_index,0);
+  assert.equal(f.q.status(first.job_id).status,'blocked','original evidence is not fabricated as sent or done');
+  await f.q.report('desktop',{job_id:next.id,status:'blocked',
+    message:'An unsent draft already exists; not overwriting it',
+    page_state:{url_kind:'home',composer:'present',composer_text:'other_draft',user_messages:0,assistant_messages:0}});
+  f.advance(60_000);await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null,'existing replacement throttle still prevents a retry loop');
+});
+
+test('uncertain delivery and other blocked starts never use the unsent-draft continuation',async t=>{
+  for(const changed of [
+    {status:'needs_review'},
+    {message:'This call was blocked by OpenAI safety systems'},
+    {page_state:{url_kind:'conversation',composer_text:'other_draft',user_messages:1,assistant_messages:0}},
+  ]) await t.test(JSON.stringify(changed),async t=>{
+    const f=await fixture(t);await f.start();const first=await f.q.claim('desktop');
+    await f.q.report('desktop',{job_id:first.id,status:'blocked',
+      message:'An unsent draft already exists; not overwriting it',
+      page_state:{url_kind:'home',composer:'present',composer_text:'other_draft',user_messages:0,assistant_messages:0},
+      ...changed});
+    f.advance(5*60_000);await f.q.tick();
+    assert.equal(await f.q.claim('desktop'),null);
+  });
+});
+
 test('status-only activity is not import progress; accepted pages resume a completed reader',async t=>{
   const f=await fixture(t);
   const first=await f.start();

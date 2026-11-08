@@ -1109,7 +1109,12 @@ export class FileQueue {
         Number.isInteger(job.book_accepted_pages_at_creation)&&
         activity.accepted_pages>job.book_accepted_pages_at_creation;
       const stale=this.#bookSilent(task,job,now);
-      const silent=(stale&&!finished)||retry||
+      const unsent=job.action==='start'&&job.status==='blocked'&&!job.model_status&&
+        !job.chat_url&&!job.result_chat_url&&
+        job.message==='An unsent draft already exists; not overwriting it'&&
+        job.page_state?.url_kind==='home'&&job.page_state.composer_text==='other_draft'&&
+        job.page_state.user_messages===0&&job.page_state.assistant_messages===0;
+      const silent=unsent||(stale&&!finished)||retry||
         (job.status==='expired'&&job.message==='Book rest'&&job.action==='start'&&!job.chat_url);
       const url=job.result_chat_url||job.chat_url;
       if(this.#bookPaused(task.device_id,now))continue;
