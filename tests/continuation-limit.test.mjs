@@ -344,13 +344,16 @@ test('at queue capacity no needs_review or unconfirmed job can be silently prune
   await writeFile(file,JSON.stringify({jobs:pending,chats:[],device_status:{}}));
   const q=new FileQueue(file,{desktop:TOKEN});
   await q.initialize();
-  await assert.rejects(q.enqueue({action:'start',prompt:'new work'}),/Queue capacity reached/);
+  const fresh=await q.enqueue({action:'start',prompt:'new work'});
+  assert.equal(fresh.status,'queued','unrelated work continues without deleting unknown receipts');
   assert.equal(q.status('uncertain-0').status,'needs_review');
   const same=await q.enqueue({action:'continue',chat_ref:ID,prompt:'Uncertain 0',request_id:'req-0'});
   assert.equal(same.id,'uncertain-0','duplicate request stays idempotent despite capacity');
   const after=new FileQueue(file,{desktop:TOKEN});
   await after.initialize();
   assert.equal(after.status('uncertain-499').status,'needs_review','uncertainty survives relay restart');
+  await assert.rejects(after.enqueue({action:'continue',chat_ref:ID,prompt:'unsafe duplicate'}),/still needs review/);
+  assert.equal(after.status(fresh.id).status,'queued');
 });
 
 test('pruned completed job leaves a durable request_id receipt across restarts',async t=>{
