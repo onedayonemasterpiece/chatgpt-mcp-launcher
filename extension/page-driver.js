@@ -311,6 +311,10 @@
     }
     return result;
   }
+  function conversationUnavailable() {
+    return !document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]').length &&
+      /Не удалось загрузить (?:этот разговор|историю)|Unable to load conversation|Failed to load conversation/i.test(document.body?.innerText||'');
+  }
   async function runSteps(job) {
     if (!job || !['start','continue'].includes(job.action) || !job.prompt || job.prompt.length > 35000) {
       return {status:'failed',message:'Invalid job'};
@@ -321,6 +325,8 @@
     const expired=()=>Date.now()-Date.parse(job.claimed_at)>=900000;
     const expiryResult=()=>({status:'needs_review',message:'Browser delivery claim expired; no further submission permitted'});
     if(expired())return expiryResult();
+    if(job.action==='continue'&&conversationUnavailable())
+      return {status:'blocked',message:'ChatGPT conversation unavailable; nothing was sent'};
     const before=window.location.href;
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
@@ -423,6 +429,8 @@
       return {status:'failed',message:'Invalid reconciliation target'};
     if(!isConversationUrl(window.location.href))
       return {status:'read',delivery_evidence:'unknown',evidence_kind:'wrong_page',execution_evidence:'unknown',message:'No verified conversation URL'};
+    if(conversationUnavailable())return {status:'read',chat_url:chatUrl(),delivery_evidence:'unknown',
+      evidence_kind:'unconfirmed',execution_evidence:'unknown',message:'ChatGPT conversation unavailable; no completion proof'};
     const ready=composer();
     const marker='job_id='+job.verify_job_id;
     const url=chatUrl();
