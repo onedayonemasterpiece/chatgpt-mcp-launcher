@@ -180,7 +180,7 @@ test('unresolved needs_review jobs are never evicted merely to make queue room',
   await writeFile(file,JSON.stringify(state));
   const r=new FileQueue(file,{desktop:token});
   await r.initialize();
-  await assert.rejects(r.enqueue({action:'start',prompt:'fresh'}),/Queue capacity reached/);
+  assert.equal((await r.enqueue({action:'start',prompt:'fresh'})).status,'queued');
   assert.equal(r.status('j0').status,'needs_review','an uncertain outcome cannot be erased by capacity pruning');
 });
 test('ChatGPT confirms through MCP: started resolves uncertainty, done carries the summary',async t=>{

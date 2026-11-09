@@ -12,7 +12,7 @@ const STALE_MS = 15 * 60_000;
 const TERMINAL = ['sent','opened','read','closed','refreshed','blocked','failed','needs_review','expired','stopped'];
 // Owner's ChatGPT plugin (MCP app) settings page; refresh_tools clicks its "Refresh tools" button.
 const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_[a-z0-9_]+$/i;
-const MAX_JOBS = 500;
+const JOB_HISTORY_TARGET = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
 const BOOK_SILENCE_MS = 20 * 60_000;
@@ -501,25 +501,25 @@ export class FileQueue {
       if(!noPrompt && (prefix||'').length+prompt.length+callbackFooter(jobId).length+
         ((book||(internalBook&&args.book_task_id))?BOOK_FOOTER.length:0)>MAX_PROMPT)
         throw Error('Final worker prompt including callbackFooter exceeds 30000 characters; nothing was sent.');
-      if(this.#state.jobs.length>=MAX_JOBS) {
-        // Never evict an ambiguous send: losing that receipt could authorize a
-        // second browser send after a restart. The existing bounded queue may
-        // reject new work rather than erase an unresolved delivery.
+      if(this.#state.jobs.length>=JOB_HISTORY_TARGET) {
+        // Compact only safely settled history. Preserve uncertain receipts and
+        // their duplicate-send fences without blocking unrelated new work.
         const removable=this.#state.jobs.findIndex(j=>TERMINAL.includes(j.status)&&
           !this.#state.book_tasks.some(t=>t.state==='active'&&t.job_id===j.id)&&
           j.status!=='needs_review'&&
           !(j.status==='sent'&&['started','progress','awaiting_confirmation','unconfirmed','unknown'].includes(this.#execution(j)))&&
           !(j.previous_chat_url&&j.status==='sent'&&!j.result_chat_url));
-        if(removable<0)throw Error('Queue capacity reached; review in-flight and uncertain work');
-        const [pruned]=this.#state.jobs.splice(removable,1);
-        if(pruned.request_id) {
-          const {prompt:discardPrompt,handoff_prefix:discardPrefix,model_summary:discardSummary,
-            model_progress:discardProgress,...receiptJob}=pruned;
-          this.#state.request_receipts.push({
-            device_id:pruned.device_id,request_id:pruned.request_id,
-            action:pruned.action,chat_url:pruned.chat_url,prompt_digest:promptDigest(pruned.prompt),
-            job:{...receiptJob,archived:true}
-          });
+        if(removable>=0) {
+          const [pruned]=this.#state.jobs.splice(removable,1);
+          if(pruned.request_id) {
+            const {prompt:discardPrompt,handoff_prefix:discardPrefix,model_summary:discardSummary,
+              model_progress:discardProgress,...receiptJob}=pruned;
+            this.#state.request_receipts.push({
+              device_id:pruned.device_id,request_id:pruned.request_id,
+              action:pruned.action,chat_url:pruned.chat_url,prompt_digest:promptDigest(pruned.prompt),
+              job:{...receiptJob,archived:true}
+            });
+          }
         }
       }
       const now=new Date(this.now()).toISOString();
