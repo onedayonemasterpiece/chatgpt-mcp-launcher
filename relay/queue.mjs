@@ -919,7 +919,7 @@ export class FileQueue {
         task.activity.accepted_pages>current.book_accepted_pages_at_creation&&
         !this.#bookSilent(task,current,this.now())&&!this.#bookPaused(task.id,this.now())&&
         !this.#state.jobs.some(job=>job.reconcile_of===current.id&&
-          Date.parse(job.created_at)>this.now()-5*60_000))
+          (Date.parse(job.created_at)>this.now()-5*60_000||job.message==='ChatGPT conversation unavailable; no completion proof')))
         await this.#enqueue({action:'reconcile',job_id:current.id,device_id:task.device_id,
           request_id:'book-observe-'+current.id+'-'+task.activity.checked_at,[BOOK_INTERNAL]:true});
       await this.#save();
@@ -1357,12 +1357,13 @@ export class FileQueue {
       }
       // A continue that could not be delivered must not lose the line of work:
       // start the same prompt in a new chat right away (owner decision, 22 Oct).
-      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id&&!job.book_task_id) {
+      if(job.action==='continue'&&job.status==='blocked'&&!job.fallback_job_id&&
+          (!job.book_task_id||job.message==='ChatGPT conversation unavailable; nothing was sent')) {
         const fallback={id:randomUUID(),action:'start',effort:job.effort,device_id:job.device_id,chat_url:null,
           prompt:'(Продолжение работы из чата '+job.chat_url+': продолжить там не удалось, поэтому задача запущена в новом окне.)\n\n'+job.prompt,
           slack_thread_url:job.slack_thread_url||null,request_id:'fallback-'+job.id,status:'queued',
           created_at:new Date(this.now()).toISOString(),fallback_of:job.id,
-          ...(job.book_task_id?{book_task_id:job.book_task_id}:{}),
+          ...(job.book_task_id?{book_task_id:job.book_task_id,book_index:job.book_index}:{}),
           previous_chat_url:job.chat_url,handoff_reason:'definitely_blocked'};
         this.#state.jobs.push(fallback);
         job.fallback_job_id=fallback.id;

@@ -242,7 +242,7 @@ test('read exposes categorical page state even when conversation messages are un
 function inspect({main='',user='',assistant='',generating=false,draft='',wrongPage=false,noMain=false,
                   unknownComposer=false,ambiguousComposer=false,noComposer=false,measureWaits=false,
                   mainEditable='',userEditable='',mainHidden='',userHidden='',
-                  stop=false,stopNoEffect=false,newerUser=false,documentState='complete',banner='',probeCounts={}}={}) {
+                  stop=false,stopNoEffect=false,newerUser=false,documentState='complete',banner='',probeCounts={},send=false}={}) {
   const editor={id:unknownComposer?'unrecognized-editor':'prompt-textarea',
     innerText:draft,textContent:draft,isConnected:true,
     getBoundingClientRect:()=>({width:300,height:40}),matches:()=>false,getAttribute:()=>null,closest:()=>null};
@@ -310,6 +310,7 @@ function inspect({main='',user='',assistant='',generating=false,draft='',wrongPa
     globalThis:null,URL:globalThis.URL,setTimeout:fn=>{waitCalls++;queueMicrotask(fn);return 1;}};
   context.globalThis=context;
   runInNewContext(driver,context,{timeout:2000});
+  if(send)return context.chatGPTLauncherRun({action:'continue',prompt:'fixture',effort:'auto'});
   if(stop)return context.chatGPTLauncherStopBook({action:'book_stop',after_job_id:ID})
     .then(result=>({...result,stop_clicks:stopClicks}));
   return context.chatGPTLauncherReconcile({action:'reconcile',verify_job_id:ID})
@@ -480,5 +481,20 @@ test('marker only in unsent editor, absent content or unrendered page is NEVER s
     {main:'job_id='+ID,wrongPage:true}]) {
     const result=await inspect(sample);
     assert.equal(result.delivery_evidence,'unknown',JSON.stringify(sample));
+  }
+});
+
+
+test('unavailable conversation is categorical, never submitted or treated as completed',async()=>{
+  for(const banner of ['Не удалось загрузить этот разговор ChatGPT','Unable to load conversation']) {
+    const result=await inspect({banner,noComposer:true,measureWaits:true});
+    assert.equal(result.message,'ChatGPT conversation unavailable; no completion proof');
+    assert.equal(result.delivery_evidence,'unknown');
+    assert.equal(result.execution_evidence,'unknown');
+    assert.equal(result.waitCalls,0);
+    const send=await inspect({banner,noComposer:true,send:true});
+    assert.equal(send.status,'blocked');
+    assert.equal(send.message,'ChatGPT conversation unavailable; nothing was sent');
+    assert.equal(JSON.stringify(result).includes('Private fixture'),false);
   }
 });
