@@ -17,7 +17,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
  const state={elapsedMs:0,clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
  const visible=()=>({width:160,height:34});
- const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
+ const delivered=()=>{state.sentText=editor.innerText;editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
    click:()=>{state.clicks++;delivered();}};
  const other={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -308,12 +308,20 @@ test('composer replacement during mention keeps our prompt and leaves foreign dr
  assert.equal(replacement.state.spaces,1);
  assert.equal(replacement.state.clicks,1);
 
- const foreign=fixture({replaceAtMs:2100,replacementDraft:'someone else draft'});
- const blocked=await foreign.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
- assert.equal(blocked.status,'blocked',JSON.stringify(blocked));
- assert.equal(foreign.currentEditor().innerText,'someone else draft');
- assert.equal(foreign.state.pastes,0);
- assert.equal(foreign.state.clicks,0);
+ for(const draft of ['someone else draft','someone else draft ping','ping\\nsomeone else draft']) {
+  const foreign=fixture({replaceAtMs:2100,replacementDraft:draft});
+  const blocked=await foreign.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+  assert.equal(blocked.status,'blocked',JSON.stringify({draft,blocked}));
+  assert.equal(foreign.currentEditor().innerText,draft,'foreign draft unchanged');
+  assert.equal(foreign.state.deletes||0,0,'never delete foreign draft');
+  assert.equal(foreign.state.pastes,0,'never paste into foreign draft');
+  assert.equal(foreign.state.clicks,0,'never submit foreign draft');
+ }
+ const lost=fixture({replaceAtMs:5000,replacementDraft:'ping'});
+ const sentWithoutMention=await lost.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+ assert.equal(sentWithoutMention.status,'sent',JSON.stringify(sentWithoutMention));
+ assert.equal(lost.state.sentText,'ping','only the original prompt was submitted');
+ assert.match(sentWithoutMention.message,/App mention skipped/,'replaced editor lost the app mention');
 });
 
 test('a malformed app name is never typed',async()=>{
