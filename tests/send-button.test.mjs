@@ -82,11 +82,14 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:(cb,ms)=>{
      state.elapsedMs+=ms;
-     if(replaceAtMs!==null && state.elapsedMs>=replaceAtMs && !state.replaced){
+     const times=Array.isArray(replaceAtMs)?replaceAtMs:[replaceAtMs];
+     while(times[state.replacements||0]!=null && state.elapsedMs>=times[state.replacements||0]){
        const old=editor;
-       editor={...old,innerText:replacementDraft??old.innerText,isConnected:true};
+       const next=Array.isArray(replacementDraft)?replacementDraft[state.replacements||0]:replacementDraft;
+       editor={...old,innerText:next??old.innerText,isConnected:true};
        old.isConnected=false;
        state.replaced=true;
+       state.replacements=(state.replacements||0)+1;
      }
      Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
@@ -113,6 +116,12 @@ test('a late Send button is clicked once after the initial Enter was ignored',as
  assert.equal(f.state.clicks,1,'click the eventual Send button once');
  assert.equal(f.state.insertions,1,'never reinsert or duplicate the draft');
  assert.equal(f.state.unrelatedClicks,0);
+ const mention=fixture({noForm:true,delayedButtonPolls:80});
+ const withMention=await mention.run({action:'start',prompt:'late hydrated send',mention:'Chatgpt task lancher'});
+ assert.equal(withMention.status,'sent',JSON.stringify(withMention));
+ assert.equal(mention.state.enters,1,'mention must survive the ignored Enter');
+ assert.equal(mention.state.clicks,1,'the late Send button is clicked once with mention');
+ assert.match(mention.state.sentText,/@Chatgpt task lancher/);
 });
 
 test('verified text succeeds even if execCommand returns false',async()=>{
@@ -319,6 +328,24 @@ test('composer replacement during mention keeps our prompt and leaves foreign dr
    assert.equal(foreign.state.clicks,0,'never submit foreign draft');
   });
  }
+ await t.test('similar number is not our own draft',async()=>{
+  const foreign=fixture({replaceAtMs:2100,replacementDraft:'Скидка 15%'});
+  const blocked=await foreign.run({action:'start',prompt:'Скидка 1,5%',mention:'Chatgpt task lancher'});
+  assert.equal(blocked.status,'blocked',JSON.stringify(blocked));
+  assert.equal(foreign.currentEditor().innerText,'Скидка 15%');
+  assert.equal(foreign.state.deletes||0,0);
+  assert.equal(foreign.state.pastes,0);
+  assert.equal(foreign.state.clicks,0);
+ });
+ for(const at of [5000,[2100,5000]]) await t.test('mention preserved after replacement '+JSON.stringify(at),async()=>{
+  const saved=fixture({replaceAtMs:at});
+  const sent=await saved.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+  assert.equal(sent.status,'sent',JSON.stringify(sent));
+  assert.equal(saved.state.replacements,Array.isArray(at)?2:1);
+  assert.equal(saved.state.pastes,1);
+  assert.equal(saved.state.clicks,1);
+  assert.match(saved.state.sentText,/@Chatgpt task lancher/,'mention remains in sent content');
+ });
  await t.test('mention lost on second replacement',async()=>{
   const lost=fixture({replaceAtMs:5000,replacementDraft:'ping'});
   const sentWithoutMention=await lost.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
