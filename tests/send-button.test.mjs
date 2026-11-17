@@ -30,6 +30,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  let editor={id:'prompt-textarea',innerText:draft,textContent:'',isConnected:true,
    getBoundingClientRect:visible,getAttribute:()=>null,
    matches:selector=>selector==='[data-testid="composer-text-input"]',
+   contains:other=>other===editor,
    closest:selector=>selector==='form'&&!noForm?form:null,
    focus:()=>{document.activeElement=editor;},
    dispatchEvent:event=>{
