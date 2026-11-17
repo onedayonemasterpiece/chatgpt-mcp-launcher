@@ -299,7 +299,7 @@ test('the launcher app is pasted on a new line, picked with a space, then sent o
  assert.equal(f.state.clicks,1);
 });
 
-test('composer replacement during mention keeps our prompt and leaves foreign drafts untouched',async()=>{
+test('composer replacement during mention keeps our prompt and leaves foreign drafts untouched',async t=>{
  const replacement=fixture({replaceAtMs:2100});
  const sent=await replacement.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
  assert.equal(sent.status,'sent',JSON.stringify(sent));
@@ -308,20 +308,24 @@ test('composer replacement during mention keeps our prompt and leaves foreign dr
  assert.equal(replacement.state.spaces,1);
  assert.equal(replacement.state.clicks,1);
 
- for(const draft of ['someone else draft','someone else draft ping','ping\\nsomeone else draft']) {
-  const foreign=fixture({replaceAtMs:2100,replacementDraft:draft});
-  const blocked=await foreign.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
-  assert.equal(blocked.status,'blocked',JSON.stringify({draft,blocked}));
-  assert.equal(foreign.currentEditor().innerText,draft,'foreign draft unchanged');
-  assert.equal(foreign.state.deletes||0,0,'never delete foreign draft');
-  assert.equal(foreign.state.pastes,0,'never paste into foreign draft');
-  assert.equal(foreign.state.clicks,0,'never submit foreign draft');
+ for(const draft of ['someone else draft','someone else draft ping','ping\nsomeone else draft']) {
+  await t.test('foreign draft: '+JSON.stringify(draft),async()=>{
+   const foreign=fixture({replaceAtMs:2100,replacementDraft:draft});
+   const blocked=await foreign.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+   assert.equal(blocked.status,'blocked',JSON.stringify({draft,blocked}));
+   assert.equal(foreign.currentEditor().innerText,draft,'foreign draft unchanged');
+   assert.equal(foreign.state.deletes||0,0,'never delete foreign draft');
+   assert.equal(foreign.state.pastes,0,'never paste into foreign draft');
+   assert.equal(foreign.state.clicks,0,'never submit foreign draft');
+  });
  }
- const lost=fixture({replaceAtMs:5000,replacementDraft:'ping'});
- const sentWithoutMention=await lost.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
- assert.equal(sentWithoutMention.status,'sent',JSON.stringify(sentWithoutMention));
- assert.equal(lost.state.sentText,'ping','only the original prompt was submitted');
- assert.match(sentWithoutMention.message,/App mention skipped/,'replaced editor lost the app mention');
+ await t.test('mention lost on second replacement',async()=>{
+  const lost=fixture({replaceAtMs:5000,replacementDraft:'ping'});
+  const sentWithoutMention=await lost.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+  assert.equal(sentWithoutMention.status,'sent',JSON.stringify(sentWithoutMention));
+  assert.equal(lost.state.sentText,'ping','only the original prompt was submitted');
+  assert.match(sentWithoutMention.message,/App mention skipped/,'replaced editor lost the app mention');
+ });
 });
 
 test('a malformed app name is never typed',async()=>{
