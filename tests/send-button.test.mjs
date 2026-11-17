@@ -347,6 +347,17 @@ test('composer replacement during mention keeps our prompt and leaves foreign dr
   assert.equal(saved.state.clicks,1);
   assert.match(saved.state.sentText,/@Chatgpt task lancher/,'mention remains in sent content');
  });
+ await t.test('foreign reversed mention in replacement stays untouched',async()=>{
+  const draft='@Maps: построй маршрут';
+  const foreign=fixture({replaceAtMs:5000,replacementDraft:draft});
+  const blocked=await foreign.run({action:'start',prompt:': построй маршрут',mention:'Maps'});
+  assert.equal(blocked.status,'blocked',JSON.stringify(blocked));
+  assert.equal(foreign.currentEditor().innerText,draft,'replacement draft unchanged');
+  assert.equal(foreign.state.pastes,1,'our paste was only into the original editor');
+  assert.equal(foreign.state.spaces||0,0,'never select the mention in a foreign editor');
+  assert.equal(foreign.state.deletes||0,0,'never erase a replacement draft');
+  assert.equal(foreign.state.clicks,0,'never send a replacement draft');
+ });
  await t.test('mention lost on second replacement',async()=>{
   const lost=fixture({replaceAtMs:5000,replacementDraft:'ping'});
   const sentWithoutMention=await lost.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
@@ -391,7 +402,8 @@ test('a mention pasted before the prompt is undone and the prompt alone is sent 
  const f=fixture({pasteAtStart:true});
  const result=await f.run({action:'start',prompt:'Review the dataset',effort:'auto',mention:'Chatgpt task lancher'});
  assert.equal(result.status,'sent',JSON.stringify(result));
- assert.match(result.message,/App mention skipped/);
+ assert.match(result.message,/App mention skipped \(it landed in the wrong place\)/);
+ assert.doesNotMatch(result.message,/composer changed/,'preserve actual reason for fallback');
  assert.equal(f.state.deletes,1);
  assert.equal(f.state.clicks,1);
 });
