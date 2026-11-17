@@ -153,14 +153,13 @@
     }
     return null;
   }
-  async function waitForSend(input,prompt) {
+  async function waitForSend(prompt,mention) {
     // ChatGPT can hydrate the Send button well after the composer itself.
     // Never consider the submission safe if the text or editor changes.
     for(let i=0;i<480;i++) {
       const current=composer();
-      // The app mention added after the prompt may render as a chip, so only
-      // the prompt itself must still be there, unchanged, at the start.
-      if(current && !promptFirst(draftText(current),prompt)) {
+      // Before either Send path, allow only the expected visible prompt/mention.
+      if(current && !promptFirst(draftText(current),prompt,mention)) {
         return {blocked:'Composer contents changed before submission'};
       }
       if(current) {
@@ -184,17 +183,18 @@
   function core(s) {
     return (s || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
   }
-  // ChatGPT turns links into chips (Slack, GitHub icons), so the composer text
-  // is not character-identical to the prompt. Ours if it starts like the
-  // prompt, holds its end (the line with our job_id) and has a similar size.
-  function samePrompt(text,prompt) {
-    const t=core(text), p=core(prompt);
-    return t===p || (t.startsWith(p.slice(0,30)) && t.endsWith(p.slice(-40)) && t.length>=p.length*0.8 && t.length<=p.length*1.3);
+  // Normalize editor typography, not meaningful punctuation (1,5% != 15%).
+  function visibleText(s) {
+    return squash((s||'').normalize('NFC'))
+      .replace(/[«»“”„]/g,'"').replace(/[‘’]/g,"'")
+      .replace(/→/g,'->').replace(/[‐‑‒–—−]/g,'-');
   }
-  // The same, but something (the app mention) may follow the prompt.
-  function promptFirst(text,prompt) {
-    const t=core(text), p=core(prompt);
-    return t.startsWith(p) || (t.startsWith(p.slice(0,30)) && t.includes(p.slice(-40)) && t.length>=p.length*0.8);
+  function samePrompt(text,prompt) {
+    return visibleText(text)===visibleText(prompt);
+  }
+  function promptFirst(text,prompt,mention='') {
+    const t=visibleText(text), p=visibleText(prompt), m=visibleText(mention);
+    return t===p || (!!m && (t===p+' @'+m || t===p+' '+m));
   }
   function clearComposer(el) {
     el.focus();
@@ -215,16 +215,21 @@
     selection.removeAllRanges();
     selection.addRange(range);
   }
-  async function addMention(el,name) {
+  async function addMention(prompt,name) {
     // Owner's recipe, like a person: a bit later, caret at the end, paste
     // "@App" as a separate line, wait for ChatGPT's app picker, then a space
     // with the caret at the end picks the app for this message.
     await sleep(2000);
-    // The editor syncs the caret asynchronously (link chips can move it), so
-    // place it, let the editor take it, and place it again before pasting.
+    // A replacement editor must contain exactly our prompt before any edit.
+    const owns=el=>el && samePrompt(draftText(el),prompt);
+    let el=composer();
+    if (!owns(el)) return false;
     caretToEnd(el);
     await sleep(500);
+    el=composer();
+    if (!owns(el)) return false;
     caretToEnd(el);
+    const pastedInto=el;
     const data=new DataTransfer();
     data.setData('text/plain','\n@'+name);
     const pasted=!el.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
@@ -233,11 +238,16 @@
       document.execCommand('insertText',false,'@'+name);
     }
     await sleep(7000);
+    el=composer();
+    const draft=el && draftText(el);
+    if (!el || samePrompt(draft,prompt) || (!promptFirst(draft,prompt,name) &&
+        !(el===pastedInto && visibleText(draft)===visibleText('@'+name+prompt)))) return false;
     if (document.activeElement!==el && !el.contains(document.activeElement)) caretToEnd(el);
     const key={key:' ',code:'Space',keyCode:32,which:32,bubbles:true,cancelable:true};
     if (el.dispatchEvent(new KeyboardEvent('keydown',key))) document.execCommand('insertText',false,' ');
     el.dispatchEvent(new KeyboardEvent('keyup',key));
     await sleep(1000);
+    return composer()===el ? el : false;
   }
   function isConversationUrl(value) {
     // ChatGPT first shows a temporary "local" address for a new chat; never treat it as the slug.
@@ -353,20 +363,28 @@
     if (!ready || draftText(ready).trim()) return {status:'blocked',message:'Composer changed or contains a draft'};
     const insertion=await insertPrompt(ready,job.prompt);
     if (!insertion.ok) return {status:'blocked',message:insertion.message};
-    let mentionNote='';
-    if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) {
-      await addMention(ready,job.mention);
-      // A launch matters more than the mention: if it landed anywhere but after
-      // the prompt, start over with the prompt alone (live job, 22 Oct 07:42 UTC).
-      if (!promptFirst(draftText(ready),job.prompt)) {
-        if (!clearComposer(ready) || !(await insertPrompt(ready,job.prompt)).ok) {
+    let mentionNote='',mentioned=false;
+    const mention=typeof job.mention==='string' &&
+      /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention) ? job.mention : '';
+    if (mention) {
+      mentioned=await addMention(job.prompt,mention);
+      const current=composer(), draft=current ? draftText(current) : '';
+      const inOrder=current && promptFirst(draft,job.prompt,mention);
+      // Only a mention pasted by us into this same editor may be removed.
+      const misplaced=mentioned===current && visibleText(draft)===visibleText('@'+mention+job.prompt);
+      if (!inOrder && !misplaced)
+        return {status:'blocked',message:'Composer changed during app mention; draft left untouched'};
+      if (!inOrder) {
+        if (!clearComposer(current) || !(await insertPrompt(current,job.prompt)).ok) {
           return {status:'blocked',message:'The app mention landed in the wrong place and the prompt could not be re-entered; draft left for manual review'};
         }
         mentionNote=' App mention skipped (it landed in the wrong place).';
-      }
+      } else if (samePrompt(draft,job.prompt)) mentionNote=' App mention skipped (composer changed).';
     }
-    const submit=await waitForSend(ready,job.prompt);
+    const submit=await waitForSend(job.prompt,mention);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
+    if(!mentionNote && mention && samePrompt(draftText(submit.editor),job.prompt))
+      mentionNote=' App mention skipped (composer changed).';
     if(expired())return expiryResult();
     let method;
     try {
@@ -387,11 +405,15 @@
         for(let i=0;i<480;i++) {
           await sleep(250);
           const now=composer();
-          if(!now || !promptFirst(draftText(now),job.prompt)) break;
+          if(!now || !promptFirst(draftText(now),job.prompt,mention)) break;
           if(i>=19) {
             const button=submitButton(now);
             if(expired())return expiryResult();
-            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';break;}
+            if(button && !button.blocked) {
+              if(!mentionNote && mention && samePrompt(draftText(now),job.prompt))
+                mentionNote=' App mention skipped (composer changed).';
+              button.click();method='Send button after an ignored Enter';break;
+            }
           }
         }
       } else {
