@@ -229,6 +229,7 @@
     el=composer();
     if (!owns(el)) return false;
     caretToEnd(el);
+    const pastedInto=el;
     const data=new DataTransfer();
     data.setData('text/plain','\n@'+name);
     const pasted=!el.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
@@ -240,7 +241,7 @@
     el=composer();
     const draft=el && draftText(el);
     if (!el || samePrompt(draft,prompt) || (!promptFirst(draft,prompt,name) &&
-        visibleText(draft)!==visibleText('@'+name+prompt))) return false;
+        !(el===pastedInto && visibleText(draft)===visibleText('@'+name+prompt)))) return false;
     if (document.activeElement!==el && !el.contains(document.activeElement)) caretToEnd(el);
     const key={key:' ',code:'Space',keyCode:32,which:32,bubbles:true,cancelable:true};
     if (el.dispatchEvent(new KeyboardEvent('keydown',key))) document.execCommand('insertText',false,' ');
@@ -382,7 +383,7 @@
     }
     const submit=await waitForSend(job.prompt,mention);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
-    if(mention && samePrompt(draftText(submit.editor),job.prompt))
+    if(!mentionNote && mention && samePrompt(draftText(submit.editor),job.prompt))
       mentionNote=' App mention skipped (composer changed).';
     if(expired())return expiryResult();
     let method;
@@ -409,7 +410,7 @@
             const button=submitButton(now);
             if(expired())return expiryResult();
             if(button && !button.blocked) {
-              if(mention && samePrompt(draftText(now),job.prompt))
+              if(!mentionNote && mention && samePrompt(draftText(now),job.prompt))
                 mentionNote=' App mention skipped (composer changed).';
               button.click();method='Send button after an ignored Enter';break;
             }
