@@ -185,7 +185,7 @@
   }
   // Normalize editor typography, not meaningful punctuation (1,5% != 15%).
   function visibleText(s) {
-    return squash((s||'').normalize('NFKC').toLocaleLowerCase())
+    return squash((s||'').normalize('NFC'))
       .replace(/[«»“”„]/g,'"').replace(/[‘’]/g,"'")
       .replace(/→/g,'->').replace(/[‐‑‒–—−]/g,'-');
   }
@@ -215,7 +215,7 @@
     selection.removeAllRanges();
     selection.addRange(range);
   }
-  async function addMention(ready,prompt,name) {
+  async function addMention(prompt,name) {
     // Owner's recipe, like a person: a bit later, caret at the end, paste
     // "@App" as a separate line, wait for ChatGPT's app picker, then a space
     // with the caret at the end picks the app for this message.
@@ -366,7 +366,7 @@
     const mention=typeof job.mention==='string' &&
       /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention) ? job.mention : '';
     if (mention) {
-      mentioned=await addMention(ready,job.prompt,mention);
+      mentioned=await addMention(job.prompt,mention);
       const current=composer(), draft=current ? draftText(current) : '';
       const inOrder=current && promptFirst(draft,job.prompt,mention);
       // Only a mention pasted by us into this same editor may be removed.
