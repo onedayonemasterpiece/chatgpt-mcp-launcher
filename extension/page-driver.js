@@ -153,7 +153,7 @@
     }
     return null;
   }
-  async function waitForSend(input,prompt) {
+  async function waitForSend(prompt) {
     // ChatGPT can hydrate the Send button well after the composer itself.
     // Never consider the submission safe if the text or editor changes.
     for(let i=0;i<480;i++) {
@@ -215,15 +215,19 @@
     selection.removeAllRanges();
     selection.addRange(range);
   }
-  async function addMention(el,name) {
+  async function addMention(prompt,name) {
     // Owner's recipe, like a person: a bit later, caret at the end, paste
     // "@App" as a separate line, wait for ChatGPT's app picker, then a space
     // with the caret at the end picks the app for this message.
     await sleep(2000);
-    // The editor syncs the caret asynchronously (link chips can move it), so
-    // place it, let the editor take it, and place it again before pasting.
+    // React can replace the composer during each wait; never edit a detached
+    // node or a different draft.
+    let el=composer();
+    if (!el || !promptFirst(draftText(el),prompt)) return false;
     caretToEnd(el);
     await sleep(500);
+    el=composer();
+    if (!el || !promptFirst(draftText(el),prompt)) return false;
     caretToEnd(el);
     const data=new DataTransfer();
     data.setData('text/plain','\n@'+name);
@@ -233,11 +237,14 @@
       document.execCommand('insertText',false,'@'+name);
     }
     await sleep(7000);
+    el=composer();
+    if (!el || (!promptFirst(draftText(el),prompt) && !core(draftText(el)).includes(core(prompt)))) return false;
     if (document.activeElement!==el && !el.contains(document.activeElement)) caretToEnd(el);
     const key={key:' ',code:'Space',keyCode:32,which:32,bubbles:true,cancelable:true};
     if (el.dispatchEvent(new KeyboardEvent('keydown',key))) document.execCommand('insertText',false,' ');
     el.dispatchEvent(new KeyboardEvent('keyup',key));
     await sleep(1000);
+    return true;
   }
   function isConversationUrl(value) {
     // ChatGPT first shows a temporary "local" address for a new chat; never treat it as the slug.
@@ -355,17 +362,21 @@
     if (!insertion.ok) return {status:'blocked',message:insertion.message};
     let mentionNote='';
     if (typeof job.mention==='string' && /^[\p{L}\p{N} ._-]{1,60}$/u.test(job.mention)) {
-      await addMention(ready,job.mention);
+      const mentioned=await addMention(job.prompt,job.mention);
+      const current=composer();
+      if (!current || (!promptFirst(draftText(current),job.prompt) &&
+          !core(draftText(current)).includes(core(job.prompt))))
+        return {status:'blocked',message:'Composer changed during app mention; draft left untouched'};
       // A launch matters more than the mention: if it landed anywhere but after
       // the prompt, start over with the prompt alone (live job, 22 Oct 07:42 UTC).
-      if (!promptFirst(draftText(ready),job.prompt)) {
-        if (!clearComposer(ready) || !(await insertPrompt(ready,job.prompt)).ok) {
+      if (!promptFirst(draftText(current),job.prompt)) {
+        if (!clearComposer(current) || !(await insertPrompt(current,job.prompt)).ok) {
           return {status:'blocked',message:'The app mention landed in the wrong place and the prompt could not be re-entered; draft left for manual review'};
         }
         mentionNote=' App mention skipped (it landed in the wrong place).';
-      }
+      } else if (!mentioned) mentionNote=' App mention skipped (composer changed).';
     }
-    const submit=await waitForSend(ready,job.prompt);
+    const submit=await waitForSend(job.prompt);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
     if(expired())return expiryResult();
     let method;

@@ -7,7 +7,8 @@ const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
                   transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false,
-                  commandResult=true,refuseInput=false,delayedInput=false,expireAfterInsert=false}={}) {
+                  commandResult=true,refuseInput=false,delayedInput=false,expireAfterInsert=false,
+                  replaceAtMs=null,replacementDraft=null}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
  let clock=0;
  let current=href; const queue=[];
@@ -26,7 +27,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    querySelectorAll:q=>q==='[contenteditable="true"],textarea'?[editor]:
      q==='button[type="submit"]'&&!noButton?[button]:[],
    requestSubmit:()=>{state.nativeSubmits++;if(nativeSubmits)delivered();}};
- const editor={id:'prompt-textarea',innerText:draft,textContent:'',isConnected:true,
+ let editor={id:'prompt-textarea',innerText:draft,textContent:'',isConnected:true,
    getBoundingClientRect:visible,getAttribute:()=>null,
    matches:selector=>selector==='[data-testid="composer-text-input"]',
    closest:selector=>selector==='form'&&!noForm?form:null,
@@ -46,7 +47,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
  const document={
    hasFocus:()=>true,
    activeElement:null,
-   createRange:()=>({selectNodeContents(){},collapse(){}}),
+   createRange:()=>({selectNodeContents(node){this.node=node;},collapse(){}}),
    querySelectorAll(selector) {
      if(selector.includes('stop-button')) {
        if(state.answerChecks++<answeringPolls) return [{isConnected:true,getBoundingClientRect:visible}];
@@ -72,16 +73,26 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      return commandResult;}
  };
  const sandbox={window:{location,getComputedStyle:()=>({visibility:'visible',display:'block'}),
-     getSelection:()=>({removeAllRanges(){},addRange(){}})},
+     getSelection:()=>({removeAllRanges(){},addRange(range){
+       if(!range.node?.isConnected)throw Error('The given range is not in document');
+     }})},
    DataTransfer:class DataTransfer {constructor(){this.d={};}setData(t,v){this.d[t]=v;}getData(t){return this.d[t];}},
    ClipboardEvent:class ClipboardEvent {constructor(type,init){Object.assign(this,init,{type});}},
    Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
-   setTimeout:(cb,ms)=>{state.elapsedMs+=ms;Promise.resolve().then(cb);return 1;}};
+   setTimeout:(cb,ms)=>{
+     state.elapsedMs+=ms;
+     if(replaceAtMs!==null && state.elapsedMs>=replaceAtMs && !state.replaced){
+       const old=editor;
+       editor={...old,innerText:replacementDraft??old.innerText,isConnected:true};
+       old.isConnected=false;
+       state.replaced=true;
+     }
+     Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
  sandbox.globalThis=sandbox;
  runInNewContext(src,sandbox,{timeout:1500,filename:'page-driver.js'});
- return {run:sandbox.chatGPTLauncherRun,state,editor};
+ return {run:sandbox.chatGPTLauncherRun,state,editor,currentEditor:()=>editor};
 }
 
 test('ping submits using a unique composer Send button exactly once',async()=>{
@@ -286,6 +297,23 @@ test('the launcher app is pasted on a new line, picked with a space, then sent o
  assert.equal(f.state.spaces,1,'a space picks the app');
  assert.equal(f.state.insertions,2,'prompt, then the space');
  assert.equal(f.state.clicks,1);
+});
+
+test('composer replacement during mention keeps our prompt and leaves foreign drafts untouched',async()=>{
+ const replacement=fixture({replaceAtMs:2100});
+ const sent=await replacement.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+ assert.equal(sent.status,'sent',JSON.stringify(sent));
+ assert.equal(replacement.state.replaced,true);
+ assert.equal(replacement.state.pastes,1,'mention pasted into the connected editor');
+ assert.equal(replacement.state.spaces,1);
+ assert.equal(replacement.state.clicks,1);
+
+ const foreign=fixture({replaceAtMs:2100,replacementDraft:'someone else draft'});
+ const blocked=await foreign.run({action:'start',prompt:'ping',mention:'Chatgpt task lancher'});
+ assert.equal(blocked.status,'blocked',JSON.stringify(blocked));
+ assert.equal(foreign.currentEditor().innerText,'someone else draft');
+ assert.equal(foreign.state.pastes,0);
+ assert.equal(foreign.state.clicks,0);
 });
 
 test('a malformed app name is never typed',async()=>{
