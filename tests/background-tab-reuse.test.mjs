@@ -72,7 +72,7 @@ function fixture(openTabs=[],opts={}) {
   const random=Object.create(Math);
   if(opts.random!==undefined) random.random=()=>opts.random;
   const sandbox={chrome,URL,Date,Number,Math:random,AbortController,
-    setTimeout:(cb,ms)=>{calls.delays.push(ms);if(ms===180000){const id={};deadlines.set(id,cb);return id;}Promise.resolve().then(cb);return 1;},
+    setTimeout:(cb,ms)=>{calls.delays.push(ms);if(ms===180000||ms===900000){const id={};deadlines.set(id,cb);return id;}Promise.resolve().then(cb);return 1;},
     clearTimeout:id=>deadlines.delete(id),fetch:opts.fetch||async function(){throw Error('Unexpected fetch');}};
   runInNewContext(source,sandbox,{filename:'background.js',timeout:2000});
   return {execute:sandbox.execute,awaitTab:sandbox.awaitTab,calls,getReads:()=>reads,
@@ -80,11 +80,11 @@ function fixture(openTabs=[],opts={}) {
     fireDeadline:()=>{assert.equal(deadlines.size,1);[...deadlines.values()][0]();}};
 }
 
-for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
+for(const action of ['read','reconcile','start','continue']) for(const hangAt of [1,2]) {
   test(`${action} Chrome call ${hangAt} keeps heartbeat live while busy and releases poll on timeout`,async()=>{
     const reports=[];
     let delivered=false;
-    const job={action,id:'read-only-job',chat_url:CHAT};
+    const job={action,id:'bounded-browser-job',chat_url:CHAT,prompt:'fixture prompt'};
     const f=fixture([{id:21,url:CHAT}],{hangAt,
       state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
       fetch:async(url,options)=>({ok:true,json:async()=>{
@@ -102,7 +102,7 @@ for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
     f.fireDeadline();
     const result=await pending;
     assert.equal(result.status,'needs_review');
-    assert.match(result.message,/read-only.*timed out/i);
+    assert.match(result.message,['start','continue'].includes(action)?/delivery.*unconfirmed/i:/read-only.*timed out/i);
     assert.equal(f.state.pendingReport,null);
     assert.equal(f.deadlines.size,0,'deadline timer cleaned up');
     assert.equal(reports.filter(r=>r.type==='heartbeat').length,2);
@@ -115,20 +115,17 @@ for(const action of ['read','reconcile']) for(const hangAt of [1,2]) {
   });
 }
 
-test('probe deadline bounds inspection while start/continue stay outside it',async()=>{
+test('all Chrome calls are bounded; send timeouts preserve unknown delivery and release polling',async()=>{
   for(const action of ['probe','start','continue']) {
     const f=fixture([{id:21,url:CHAT}],{hangAt:1});
     const pending=f.sandbox.runDriver('page-driver.js',{id:21},{action,chat_url:CHAT});
     await Promise.resolve();
-    if(action==='probe') {
-      f.fireDeadline();
-      await assert.rejects(pending,/read-only.*timed out/i);
-      assert.equal(f.deadlines.size,0);
-    } else {
-      assert.equal(f.deadlines.size,0,'prompt actions have no inspection timeout');
-      f.releaseScript();
-      assert.equal((await pending).result.status,'sent');
-    }
+    assert.equal(f.deadlines.size,1);
+    assert.ok(f.calls.delays.includes(action==='probe'?180000:900000));
+    f.fireDeadline();
+    await assert.rejects(pending,action==='probe'?/read-only.*timed out/i:/delivery.*unconfirmed/i);
+    assert.equal(f.deadlines.size,0);
+    f.releaseScript();
   }
 });
 
@@ -227,11 +224,11 @@ test('start and continue wait a varied few seconds after opening or focusing a c
   for(const [random,expected] of [[0,1500],[0.5,2500],[0.9999,3500]]) {
     const f=fixture([{id:21,url:CHAT}],{random});
     await f.execute({action:'continue',chat_url:CHAT,prompt:'Continue'});
-    assert.deepEqual(f.calls.delays,[expected]);
+    assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[expected]);
   }
   const f=fixture([],{random:0.5});
   await f.execute({action:'start',prompt:'New conversation'});
-  assert.deepEqual(f.calls.delays,[2500]);
+  assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[2500]);
 });
 
 test('open-only reuses existing conversation and never touches composer or Send button',async()=>{
@@ -304,7 +301,7 @@ test('start falls back to a fresh tab when the open New chat tab holds a draft',
   assert.equal(f.calls.created.length,1);
   assert.equal(f.calls.created[0].url,HOME);
   assert.deepEqual(f.calls.injections,[32,32,100,100]);
-  assert.deepEqual(f.calls.delays,[2500,2500]);
+  assert.deepEqual(f.calls.delays.filter(ms=>ms<180000),[2500,2500]);
 });
 
 test('Frame 0 removed after Send is recovered only from a matching read-only job marker',async()=>{
@@ -503,4 +500,66 @@ test('missing refresh button reports bounded visible labels and path without cli
   assert.ok(labels.every(label=>label.length<=60));
   assert.equal(result.message.includes('hidden-secret'),false);
   assert.equal(result.message.includes('private=omitted'),false);
+});
+
+test('one poll drains queued deliveries serially without waiting for another alarm',async()=>{
+  const queued=[1,2,3].map(n=>({id:'drain-'+n,action:'read',chat_url:CHAT}));
+  let claims=0,active=0,maxActive=0;
+  const executions=[],reports=[];
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>({ok:true,json:async()=>{
+      if(url.endsWith('/device/poll')) {claims++;return {job:queued.shift()||null};}
+      const body=JSON.parse(options.body);if(body.job_id)reports.push(body.job_id);return {ok:true};
+    }})});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async job=>{
+    active++;maxActive=Math.max(maxActive,active);await Promise.resolve();
+    executions.push(job.id);active--;return {status:'read',chat_url:CHAT};
+  };
+  const result=await f.sandbox.poll();
+  assert.deepEqual(executions,['drain-1','drain-2','drain-3']);
+  assert.deepEqual(reports,executions);
+  assert.equal(maxActive,1,'one browser action remains in flight');
+  assert.equal(claims,4,'stop at existing idle response');
+  assert.equal(result.job_id,'drain-3');
+  assert.equal(f.state.pendingReport,null);
+  assert.equal((await f.sandbox.poll()).idle,true);
+});
+
+test('queue drain stops at an unacknowledged report and retains reconciliation',async()=>{
+  let claims=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url,options)=>{
+      if(url.endsWith('/device/report')&&JSON.parse(options.body).job_id)throw Error('report unavailable');
+      return {ok:true,json:async()=>url.endsWith('/device/poll')?{job:{id:'drain-report',action:'read',chat_url:CHAT}}:{ok:true}};
+    }});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async()=>{claims++;return {status:'read',chat_url:CHAT};};
+  assert.match((await f.sandbox.poll()).error,/report unavailable/);
+  assert.equal(claims,1);
+  assert.equal(f.state.pendingReport.job_id,'drain-report');
+});
+
+test('serial drain does not claim another job after commands are disabled',async()=>{
+  let claims=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url)=>({ok:true,json:async()=>url.endsWith('/device/poll')?
+      {job:{id:'disable-'+(++claims),action:'read',chat_url:CHAT}}:{ok:true}})});
+  f.sandbox.runningVersion=async()=>({update_state:'current'});
+  f.sandbox.execute=async()=>{f.state.config.enabled=false;return {status:'read',chat_url:CHAT};};
+  assert.equal((await f.sandbox.poll()).job_id,'disable-1');
+  assert.equal(claims,1);
+  assert.equal((await f.sandbox.poll()).commands_disabled,true);
+});
+
+test('serial drain leaves remaining work queued when the loaded version changes',async()=>{
+  let claims=0,versions=0;
+  const f=fixture([],{state:{config:{url:'https://relay.example',token:'fixture',deviceId:'desktop',enabled:true}},
+    fetch:async(url)=>({ok:true,json:async()=>url.endsWith('/device/poll')?
+      {job:{id:'version-'+(++claims),action:'read',chat_url:CHAT}}:{ok:true}})});
+  f.sandbox.runningVersion=async()=>({update_state:++versions===1?'current':'outdated'});
+  f.sandbox.execute=async()=>({status:'read',chat_url:CHAT});
+  assert.equal((await f.sandbox.poll()).job_id,'version-1');
+  assert.equal(claims,1);
+  assert.equal(f.state.pendingReport,null);
 });
