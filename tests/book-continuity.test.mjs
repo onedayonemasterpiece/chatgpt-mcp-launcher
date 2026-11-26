@@ -916,7 +916,7 @@ test('an undelivered initial reader with zero RKB operations recovers without an
 
 
 
-test('owner suspension ignores assigned rests without changing jobs, prompts or cycle clocks',async t=>{
+test('assigned book rest survives restart and resumes without changing jobs, prompts or cycle clocks',async t=>{
   const f=await fixture(t);
   const first=await f.start();await f.deliver(first);await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'done'});
@@ -925,17 +925,22 @@ test('owner suspension ignores assigned rests without changing jobs, prompts or 
   saved.book_cycles[first.job_id]=cycle;
   await writeFile(f.file,JSON.stringify(saved));
   const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
-  assert.equal(restored.status(first.job_id).book_task.rest_until,null);
+  assert.equal(restored.status(first.job_id).book_task.rest_until,new Date(cycle.resume_at).toISOString());
   await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
     last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
   await restored.tick();
-  const next=await restored.claim('desktop');
-  assert.equal(next.book_task_id,first.job_id);assert.equal(next.action,'continue');
+  assert.equal(await restored.claim('desktop'),null,'no continuation during assigned rest');
   const after=JSON.parse(await readFile(f.file,'utf8'));
   assert.deepEqual(after.book_cycles[first.job_id],cycle,'owner suspension does not reset cycle history');
   assert.equal(after.book_tasks[0].continuation_prompt,saved.book_tasks[0].continuation_prompt);
   assert.deepEqual(after.book_tasks[0].books,saved.book_tasks[0].books);
   assert.deepEqual(after.jobs.find(j=>j.id===first.job_id),saved.jobs.find(j=>j.id===first.job_id));
+  f.advance(90*60_000);
+  await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+    last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
+  await restored.tick();
+  const next=await restored.claim('desktop');
+  assert.equal(next.book_task_id,first.job_id);assert.equal(next.action,'continue');
 });
 
 
@@ -974,4 +979,21 @@ test('a settled book poll observes exact completion before the silence handoff',
   assert.equal(next.book_task_id,first.job_id);assert.equal(next.book_index,0);
   assert.equal(f.q.status(first.job_id).model_status,'started','DOM proof does not fabricate a model callback');
   assert.ok(f.q.status(first.job_id).page_completed_at);
+});
+
+test('three-hour reader cycle waits for issued work and then gives the full rest',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  await f.activity(first,'processing');
+  f.advance(3*60*60_000);await f.activity(first,'processing');await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,'issued work keeps its original turn');
+  assert.equal(await f.q.claim('desktop'),null);
+  await f.q.modelReport({job_id:first.job_id,status:'done'});
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
+  f.advance(34*60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null);
+  f.advance(60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).book_task_id,first.job_id);
 });
