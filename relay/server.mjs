@@ -384,7 +384,8 @@ if (process.argv[1] && resolve(process.argv[1]) === new URL(import.meta.url).pat
   let devices;
   try {devices = JSON.parse(process.env.LAUNCHER_DEVICES_JSON || '{}');}
   catch {throw new Error('LAUNCHER_DEVICES_JSON is not valid JSON');}
-  makeRelay({file:process.env.LAUNCHER_STATE_FILE || './var/queue.json',mcpToken:process.env.LAUNCHER_MCP_TOKEN,devices}).then(({server})=>{
+  const queueOptions=process.env.LAUNCHER_BOOK_CONCURRENCY===undefined?{}:{bookConcurrency:Number(process.env.LAUNCHER_BOOK_CONCURRENCY)};
+  makeRelay({file:process.env.LAUNCHER_STATE_FILE || './var/queue.json',mcpToken:process.env.LAUNCHER_MCP_TOKEN,devices,queueOptions}).then(({server})=>{
     server.listen(port,host,()=>console.log(`ChatGPT launcher relay on ${host}:${port}`));
   }).catch(err=>{console.error(err.message);process.exitCode=1;});
 }
