@@ -947,7 +947,7 @@ test('an undelivered initial reader with zero RKB operations recovers without an
 
 
 
-test('owner suspension ignores assigned rests without changing jobs, prompts or cycle clocks',async t=>{
+test('assigned book rest survives restart and resumes without changing jobs, prompts or cycle clocks',async t=>{
   const f=await fixture(t);
   const first=await f.start();await f.deliver(first);await f.activity(first);
   await f.q.modelReport({job_id:first.job_id,status:'done'});
@@ -956,17 +956,22 @@ test('owner suspension ignores assigned rests without changing jobs, prompts or 
   saved.book_cycles[first.job_id]=cycle;
   await writeFile(f.file,JSON.stringify(saved));
   const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
-  assert.equal(restored.status(first.job_id).book_task.rest_until,null);
+  assert.equal(restored.status(first.job_id).book_task.rest_until,new Date(cycle.resume_at).toISOString());
   await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
     last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
   await restored.tick();
-  const next=await restored.claim('desktop');
-  assert.equal(next.book_task_id,first.job_id);assert.equal(next.action,'continue');
+  assert.equal(await restored.claim('desktop'),null,'no continuation during assigned rest');
   const after=JSON.parse(await readFile(f.file,'utf8'));
   assert.deepEqual(after.book_cycles[first.job_id],cycle,'owner suspension does not reset cycle history');
   assert.equal(after.book_tasks[0].continuation_prompt,saved.book_tasks[0].continuation_prompt);
   assert.deepEqual(after.book_tasks[0].books,saved.book_tasks[0].books);
   assert.deepEqual(after.jobs.find(j=>j.id===first.job_id),saved.jobs.find(j=>j.id===first.job_id));
+  f.advance(90*60_000);
+  await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+    last_operation_at:new Date(f.now()).toISOString(),accepted_pages:15,next_cursor:'41'});
+  await restored.tick();
+  const next=await restored.claim('desktop');
+  assert.equal(next.book_task_id,first.job_id);assert.equal(next.action,'continue');
 });
 
 
@@ -1007,6 +1012,23 @@ test('a settled book poll observes exact completion before the silence handoff',
   assert.ok(f.q.status(first.job_id).page_completed_at);
 });
 
+test('three-hour reader cycle waits for issued work and then gives the full rest',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  await f.activity(first,'processing');
+  f.advance(3*60*60_000);await f.activity(first,'processing');await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,null,'issued work keeps its original turn');
+  assert.equal(await f.q.claim('desktop'),null);
+  await f.q.modelReport({job_id:first.job_id,status:'done'});
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal(f.q.status(first.job_id).book_task.rest_until,new Date(f.now()+35*60_000).toISOString());
+  f.advance(34*60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal(await f.q.claim('desktop'),null);
+  f.advance(60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).book_task_id,first.job_id);
+});
+
 test('a single refusal is retried once; progress after the retry keeps the book without notices',async t=>{
   const f=await fixture(t);
   const first=await f.start([{ingestion_id:ING1},{ingestion_id:ING2}]);
@@ -1023,4 +1045,18 @@ test('a single refusal is retried once; progress after the retry keeps the book 
   assert.equal(next.chat_url,THIRD);
   assert.equal(next.book_index,0);
   assert.equal(f.q.pendingBookNotices().length,0);
+});
+
+test('three ordinary book slots leave a fourth queue intact until a slot completes',async t=>{
+  const f=await fixture(t);const tasks=[];
+  for(const [n,id] of [ING1,ING2,ING3,'77777777-aaaa-bbbb-cccc-999999999999'].entries())
+    tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
+  assert.equal(f.q.activeBooks().length,3);
+  for(let n=0;n<3;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
+  assert.equal(await f.q.claim('desktop'),null,'fourth book is not delivered while three slots are occupied');
+  await f.q.modelReport({job_id:tasks[0].job_id,status:'done'});
+  await f.activity(tasks[0],'finalized');await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).id,tasks[3].job_id);
+  const persisted=JSON.parse(await readFile(f.file,'utf8'));
+  assert.equal(persisted.book_tasks.length,4,'no book or prompt is discarded to enforce capacity');
 });
