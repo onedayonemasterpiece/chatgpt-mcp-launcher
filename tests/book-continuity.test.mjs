@@ -41,13 +41,13 @@ test('a legacy device cycle preserves work start and assigned rest for every exi
 });
 
 
-async function fixture(t,{random=Math.random}={}) {
+async function fixture(t,{random=Math.random,bookConcurrency=4}={}) {
   const dir=await mkdtemp(join(tmpdir(),'launcher-book-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const file=join(dir,'queue.json');
   let time=Date.parse('2026-10-30T06:00:00Z');
   const now=()=>time;
-  const q=new FileQueue(file,{desktop:DEVICE},{now,random});
+  const q=new FileQueue(file,{desktop:DEVICE},{now,random,bookConcurrency});
   await q.initialize();
   const start=async(books=[{ingestion_id:ING1}],request_id='books-1')=>q.enqueue({
     action:'start',request_id,prompt:'Начни импорт первой книги.',
@@ -998,16 +998,21 @@ test('three-hour reader cycle waits for issued work and then gives the full rest
   assert.equal((await f.q.claim('desktop')).book_task_id,first.job_id);
 });
 
-test('six owner-authorized book slots leave a seventh queue intact until a slot completes',async t=>{
-  const f=await fixture(t);const tasks=[];
+for(const slots of [1,2,4])test(`${slots} staged book slots preserve excess queues until a slot completes`,async t=>{
+  const f=await fixture(t,{bookConcurrency:slots});const tasks=[];
   for(const [n,id] of [ING1,ING2,ING3,...[4,5,6,7].map(n=>'77777777-aaaa-bbbb-cccc-99999999999'+n)].entries())
     tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
-  assert.equal(f.q.activeBooks().length,6);
-  for(let n=0;n<6;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
-  assert.equal(await f.q.claim('desktop'),null,'seventh book is not delivered while six slots are occupied');
+  assert.equal(f.q.activeBooks().length,slots);
+  for(let n=0;n<slots;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
+  assert.equal(await f.q.claim('desktop'),null,'excess book is not delivered while staged slots are occupied');
   await f.q.modelReport({job_id:tasks[0].job_id,status:'done'});
   await f.activity(tasks[0],'finalized');await f.q.tick();
-  assert.equal((await f.q.claim('desktop')).id,tasks[6].job_id);
+  assert.equal((await f.q.claim('desktop')).id,tasks[slots].job_id);
   const persisted=JSON.parse(await readFile(f.file,'utf8'));
   assert.equal(persisted.book_tasks.length,7,'no book or prompt is discarded to enforce capacity');
+});
+
+
+test('rollout capacity rejects an accidental return to six windows',()=>{
+  assert.throws(()=>new FileQueue('unused',{}, {bookConcurrency:6}),/book concurrency/i);
 });

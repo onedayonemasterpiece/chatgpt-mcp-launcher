@@ -15,7 +15,7 @@ const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_
 const JOB_HISTORY_TARGET = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
-const BOOK_CONCURRENCY = 6;
+const BOOK_CONCURRENCY = 4;
 const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_SILENCE_MS = 20 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
@@ -194,7 +194,9 @@ export class FileQueue {
   #serial = Promise.resolve();
   // silenceMs: no report from the agent for this long after started/progress
   // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
-  constructor(file, devices, {now=()=>Date.now(),random=Math.random,silenceMs=30*60_000,confirmMs=10*60_000,seal=null}={}) {
+  constructor(file, devices, {now=()=>Date.now(),random=Math.random,silenceMs=30*60_000,confirmMs=10*60_000,seal=null,bookConcurrency=BOOK_CONCURRENCY}={}) {
+    if(!Number.isInteger(bookConcurrency)||bookConcurrency<1||bookConcurrency>BOOK_CONCURRENCY)throw Error('book concurrency must be1–4');
+    this.bookConcurrency=bookConcurrency;
     this.file = file;
     this.devices = devices;
     this.now = now;
@@ -966,7 +968,7 @@ export class FileQueue {
     });
   }
   activeBooks() {
-    return this.#state.book_tasks.filter(t=>t.state==='active').slice(0,BOOK_CONCURRENCY)
+    return this.#state.book_tasks.filter(t=>t.state==='active').slice(0,this.bookConcurrency)
       .map(t=>({book_task_id:t.id,ingestion_id:t.books[t.index].ingestion_id}));
   }
   async closeRetiredBookChats() {
