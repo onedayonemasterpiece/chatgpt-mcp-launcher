@@ -172,7 +172,7 @@
         // ChatGPT (live job at 18:58 UTC), so it is not used.
         // On a long prompt the Send button can take several seconds to enable;
         // a synthetic Enter is often ignored (live 22 Oct), so it is the last resort.
-        if(i>=120) return {enter:true,editor:current};
+        if(i>=12) return {enter:true,editor:current};
       }
       await sleep(250);
     }
@@ -311,6 +311,10 @@
     }
     return result;
   }
+  function conversationUnavailable() {
+    return !document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]').length &&
+      /Не удалось загрузить (?:этот разговор|историю)|Unable to load conversation|Failed to load conversation/i.test(document.body?.innerText||'');
+  }
   async function runSteps(job) {
     if (!job || !['start','continue'].includes(job.action) || !job.prompt || job.prompt.length > 35000) {
       return {status:'failed',message:'Invalid job'};
@@ -318,6 +322,11 @@
     if (job.action === 'continue' && !isConversationUrl(window.location.href)) {
       return {status:'blocked',message:'Not on a ChatGPT conversation URL'};
     }
+    const expired=()=>Date.now()-Date.parse(job.claimed_at)>=900000;
+    const expiryResult=()=>({status:'needs_review',message:'Browser delivery claim expired; no further submission permitted'});
+    if(expired())return expiryResult();
+    if(job.action==='continue'&&conversationUnavailable())
+      return {status:'blocked',message:'ChatGPT conversation unavailable; nothing was sent'};
     const before=window.location.href;
     const input=await waitForComposer();
     if (!input) return {status:'blocked',message:'ChatGPT composer unavailable after 90 seconds (login/challenge/loading/ambiguous field)'};
@@ -358,6 +367,7 @@
     }
     const submit=await waitForSend(ready,job.prompt);
     if(submit.blocked) return {status:'blocked',message:submit.blocked+'; draft left for manual review'};
+    if(expired())return expiryResult();
     let method;
     try {
       if(submit.button) {
@@ -374,13 +384,14 @@
         // ChatGPT empties the composer at once when it sends. If our prompt is
         // still there after a few seconds, Enter was ignored and nothing went
         // out, so one click on the Send button cannot duplicate anything.
-        for(let i=0;i<20;i++) {
+        for(let i=0;i<480;i++) {
           await sleep(250);
           const now=composer();
           if(!now || !promptFirst(draftText(now),job.prompt)) break;
-          if(i===19) {
+          if(i>=19) {
             const button=submitButton(now);
-            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';}
+            if(expired())return expiryResult();
+            if(button && !button.blocked) {button.click();method='Send button after an ignored Enter';break;}
           }
         }
       } else {
@@ -418,6 +429,8 @@
       return {status:'failed',message:'Invalid reconciliation target'};
     if(!isConversationUrl(window.location.href))
       return {status:'read',delivery_evidence:'unknown',evidence_kind:'wrong_page',execution_evidence:'unknown',message:'No verified conversation URL'};
+    if(conversationUnavailable())return {status:'read',chat_url:chatUrl(),delivery_evidence:'unknown',
+      evidence_kind:'unconfirmed',execution_evidence:'unknown',message:'ChatGPT conversation unavailable; no completion proof'};
     const ready=composer();
     const marker='job_id='+job.verify_job_id;
     const url=chatUrl();
@@ -458,7 +471,7 @@
     const answer=turns[index+1];
     const complete=index>=0 && answer?.getAttribute?.('data-message-author-role')==='assistant' &&
       renderedOutsideEditors(answer,text=>!!text.trim()) && !replyInProgress();
-    return {status:'read',chat_url:url,
+    return {status:'read',chat_url:url,page_state:pageState(job),dom_probe:domProbe(),
       delivery_evidence:evidence_kind==='unconfirmed'?'unknown':'sent',evidence_kind,
       execution_evidence:complete?'page_completed':'unknown',
       message:complete?'Assistant reply after this job marker is complete (page evidence only)':

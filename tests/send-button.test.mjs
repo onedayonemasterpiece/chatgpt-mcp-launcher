@@ -7,13 +7,14 @@ const src=await readFile(new URL('../extension/page-driver.js',import.meta.url),
 function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=true,
                   noForm=false,delayedButtonPolls=0,draft='',href='https://chatgpt.com/',
                   transientUrls=[],answeringPolls=0,enterDelivers=false,reformat=t=>t,pasteAtStart=false,
-                  commandResult=true,refuseInput=false,delayedInput=false}={}) {
+                  commandResult=true,refuseInput=false,delayedInput=false,expireAfterInsert=false}={}) {
  // Each read of a transient address counts as time passing; the final one stays.
+ let clock=0;
  let current=href; const queue=[];
  const location={get href(){if(queue.length&&queue[0].reads--<=0)queue.shift();
      return queue.length?queue[0].url:current;},
    set href(v){current=v;queue.push(...transientUrls.map(url=>({url,reads:8})));}};
- const state={clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
+ const state={elapsedMs:0,clicks:0,unrelatedClicks:0,insertions:0,nativeSubmits:0,buttonChecks:0,answerChecks:0,enters:0,pastes:0,spaces:0};
  const visible=()=>({width:160,height:34});
  const delivered=()=>{editor.innerText='';location.href='https://chatgpt.com/c/abcd1234';};
  const button={disabled:false,isConnected:true,getBoundingClientRect:visible,
@@ -31,7 +32,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    closest:selector=>selector==='form'&&!noForm?form:null,
    focus:()=>{document.activeElement=editor;},
    dispatchEvent:event=>{
-     if(event.type==='keydown'&&event.key==='Enter'){state.enters++;if(enterDelivers)delivered();}
+     if(event.type==='keydown'&&event.key==='Enter'){state.firstEnterAtMs??=state.elapsedMs;state.enters++;if(enterDelivers)delivered();}
      if(event.type==='keydown'&&event.key===' ')state.spaces++;
      if(event.type==='paste'){
        state.pastes++;
@@ -63,7 +64,7 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
    execCommand:(command,_show,text)=>{
      if(command==='insertParagraph'){editor.innerText+='\n';return true;}
      if(command==='delete'){state.deletes=(state.deletes||0)+1;editor.innerText='';return true;}
-     assert.equal(command,'insertText');state.insertions++;
+     assert.equal(command,'insertText');state.insertions++;if(expireAfterInsert)clock=900001;
      if(!refuseInput) {
        const apply=()=>{editor.innerText+=reformat(text);};
        if(delayedInput) Promise.resolve().then(apply); else apply();
@@ -74,8 +75,9 @@ function fixture({formOnly=false,ambiguous=false,noButton=false,nativeSubmits=tr
      getSelection:()=>({removeAllRanges(){},addRange(){}})},
    DataTransfer:class DataTransfer {constructor(){this.d={};}setData(t,v){this.d[t]=v;}getData(t){return this.d[t];}},
    ClipboardEvent:class ClipboardEvent {constructor(type,init){Object.assign(this,init,{type});}},
+   Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
-   setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
+   setTimeout:(cb,ms)=>{state.elapsedMs+=ms;Promise.resolve().then(cb);return 1;}};
  sandbox.KeyboardEvent=class KeyboardEvent {constructor(type,init){Object.assign(this,init,{type});}};
  sandbox.globalThis=sandbox;
  runInNewContext(src,sandbox,{timeout:1500,filename:'page-driver.js'});
@@ -89,6 +91,16 @@ test('ping submits using a unique composer Send button exactly once',async()=>{
  assert.equal(f.state.clicks,1);
  assert.equal(f.state.nativeSubmits,0);
  assert.equal(f.state.insertions,1);
+ assert.equal(f.state.unrelatedClicks,0);
+});
+
+test('a late Send button is clicked once after the initial Enter was ignored',async()=>{
+ const f=fixture({noForm:true,delayedButtonPolls:80});
+ const result=await f.run({action:'start',prompt:'late hydrated send',effort:'auto'});
+ assert.equal(result.status,'sent',JSON.stringify(result));
+ assert.equal(f.state.enters,1,'preserve the existing single early Enter');
+ assert.equal(f.state.clicks,1,'click the eventual Send button once');
+ assert.equal(f.state.insertions,1,'never reinsert or duplicate the draft');
  assert.equal(f.state.unrelatedClicks,0);
 });
 
@@ -191,6 +203,7 @@ function readFixture({replies=[],streaming=false,historyError=false,frames=[],hr
    execCommand:()=>{state.insertions++;return true;}
  };
  const sandbox={window:{location:{href},getComputedStyle:()=>({visibility:'visible',display:'block'})},
+   Date:class extends Date {static now(){return clock;}},
    document,globalThis:null,URL,InputEvent:class InputEvent {},
    setTimeout:cb=>{Promise.resolve().then(cb);return 1;}};
  sandbox.globalThis=sandbox;
@@ -336,10 +349,38 @@ test('a blocked job describes the window in plain fields for the coordinator',as
 
 test('an ignored Enter is followed by exactly one click once the Send button is enabled',async()=>{
  // The button becomes findable only after the Enter fallback has fired.
- const f=fixture({noForm:true,delayedButtonPolls:121});
+ const f=fixture({noForm:true,delayedButtonPolls:13});
  const result=await f.run({action:'start',prompt:'long prompt',effort:'auto'});
  assert.equal(result.status,'sent',JSON.stringify(result));
  assert.equal(f.state.enters,1);
  assert.equal(f.state.clicks,1);
  assert.match(result.message,/after an ignored Enter/);
+});
+
+for(const late of [false,true]) test(`expired send cannot click after a delayed browser action (after insert=${late})`,async()=>{
+ const f=fixture({expireAfterInsert:late});
+ const result=await f.run({action:'start',prompt:'do not send expired work',effort:'auto',claimed_at:late?'1970-01-01T00:00:00.000Z':'1969-12-31T23:00:00.000Z'});
+ assert.equal(result.status,'needs_review');
+ assert.match(result.message,/expired/i);
+ assert.equal(f.state.clicks,0);
+ assert.equal(f.state.enters,0);
+ if(!late)assert.equal(f.state.insertions,0);
+});
+
+
+test('absent Send button uses the existing single Enter fallback after three seconds',async()=>{
+ const f=fixture({noButton:true,noForm:true,enterDelivers:true});
+ const result=await f.run({action:'start',prompt:'ping',effort:'auto'});
+ assert.equal(result.status,'sent');
+ assert.equal(f.state.firstEnterAtMs,3100,'100ms editor reconciliation plus twelve250ms polls');
+ assert.equal(f.state.enters,1);
+ assert.equal(f.state.clicks+f.state.nativeSubmits,0);
+});
+
+test('a Send button hydrated within three seconds still submits through one button click',async()=>{
+ const f=fixture({noForm:true,delayedButtonPolls:8});
+ const result=await f.run({action:'start',prompt:'long prompt',effort:'auto'});
+ assert.equal(result.status,'sent');
+ assert.equal(f.state.clicks,1);
+ assert.equal(f.state.enters+f.state.nativeSubmits,0);
 });
