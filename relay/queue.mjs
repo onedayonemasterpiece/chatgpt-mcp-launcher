@@ -15,6 +15,7 @@ const PLUGIN_URL = /^https:\/\/chatgpt\.com\/settings\/plugins-settings\/plugin_
 const JOB_HISTORY_TARGET = 500;
 const MAX_PROMPT = 30_000;
 const MAX_CONTINUATIONS = 5;
+const BOOK_CONCURRENCY = 3;
 const BOOK_WORK_MS = 3 * 60 * 60_000;
 const BOOK_SILENCE_MS = 20 * 60_000;
 const BOOK_INTERNAL = Symbol('book relay tick'); // cannot be supplied over MCP JSON
@@ -212,6 +213,8 @@ export class FileQueue {
     return until>now?new Date(until).toISOString():null;
   }
   #bookPaused(taskId,now=this.now()) {
+    if(this.#state.book_tasks.some(t=>t.id===taskId)&&
+      !this.activeBooks().some(t=>t.book_task_id===taskId))return true;
     const cycle=this.#state.book_cycles[taskId];
     return !!cycle && (cycle.resume_at>now ||
       (!cycle.resume_at && now-cycle.started_at>=BOOK_WORK_MS));
@@ -963,7 +966,7 @@ export class FileQueue {
     });
   }
   activeBooks() {
-    return this.#state.book_tasks.filter(t=>t.state==='active')
+    return this.#state.book_tasks.filter(t=>t.state==='active').slice(0,BOOK_CONCURRENCY)
       .map(t=>({book_task_id:t.id,ingestion_id:t.books[t.index].ingestion_id}));
   }
   async closeRetiredBookChats() {
@@ -1254,6 +1257,8 @@ export class FileQueue {
       let job=null;
       for(const candidate of this.#state.jobs) {
         if(candidate.device_id!==deviceId||candidate.status!=='queued')continue;
+        if(candidate.book_task_id&&['start','continue'].includes(candidate.action)&&
+          this.#bookPaused(candidate.book_task_id,now))continue;
         if(candidate.action==='book_stop') {
           const task=this.#state.book_tasks.find(t=>t.id===candidate.book_task_id);
           const source=this.#state.jobs.find(j=>j.id===candidate.after_job_id);
