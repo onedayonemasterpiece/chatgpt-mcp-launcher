@@ -1065,3 +1065,21 @@ for(const slots of [1,2,4])test(`${slots} staged book slots preserve excess queu
 test('rollout capacity rejects an accidental return to six windows',()=>{
   assert.throws(()=>new FileQueue('unused',{}, {bookConcurrency:6}),/book concurrency/i);
 });
+
+
+for(const mode of ['pre_send','unknown','foreign_draft','model_started'])test(`book continuation ${mode} keeps exact delivery fences`,async t=>{
+  const f=await fixture(t,{bookConcurrency:1});const first=await f.start();
+  await f.deliver(first);await f.activity(first);await f.q.modelReport({job_id:first.job_id,status:'done'});
+  await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  const next=await f.q.claim('desktop');assert.equal(next.action,'continue');
+  await f.q.report('desktop',{job_id:next.id,status:mode==='unknown'?'needs_review':'blocked',
+    message:'Composer contents changed before submission; draft left for manual review',
+    page_state:{url_kind:'conversation',composer:'present',composer_text:mode==='foreign_draft'?'other_draft':'our_prompt',answering:false,user_messages:0,assistant_messages:0}});
+  if(mode==='model_started')await f.q.modelReport({job_id:next.id,status:'started'});
+  f.advance(60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
+  const replacement=await f.q.claim('desktop');
+  if(mode!=='pre_send'){assert.equal(replacement,null);return;}
+  assert.equal(replacement.book_task_id,first.job_id);assert.equal(replacement.book_index,0);
+  assert.equal(replacement.delivery_action,'start');assert.equal(replacement.chat_url,null);
+  assert.equal(f.q.status(next.id).status,'blocked','do not invent successful submission');
+});
