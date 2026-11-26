@@ -997,3 +997,17 @@ test('three-hour reader cycle waits for issued work and then gives the full rest
   f.advance(60_000);await f.activity(first,'staged',new Date(f.now()).toISOString(),15);await f.q.tick();
   assert.equal((await f.q.claim('desktop')).book_task_id,first.job_id);
 });
+
+test('three ordinary book slots leave a fourth queue intact until a slot completes',async t=>{
+  const f=await fixture(t);const tasks=[];
+  for(const [n,id] of [ING1,ING2,ING3,'77777777-aaaa-bbbb-cccc-999999999999'].entries())
+    tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
+  assert.equal(f.q.activeBooks().length,3);
+  for(let n=0;n<3;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
+  assert.equal(await f.q.claim('desktop'),null,'fourth book is not delivered while three slots are occupied');
+  await f.q.modelReport({job_id:tasks[0].job_id,status:'done'});
+  await f.activity(tasks[0],'finalized');await f.q.tick();
+  assert.equal((await f.q.claim('desktop')).id,tasks[3].job_id);
+  const persisted=JSON.parse(await readFile(f.file,'utf8'));
+  assert.equal(persisted.book_tasks.length,4,'no book or prompt is discarded to enforce capacity');
+});
