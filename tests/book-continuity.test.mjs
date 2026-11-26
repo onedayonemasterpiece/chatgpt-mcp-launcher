@@ -1047,16 +1047,16 @@ test('a single refusal is retried once; progress after the retry keeps the book 
   assert.equal(f.q.pendingBookNotices().length,0);
 });
 
-test('three ordinary book slots leave a fourth queue intact until a slot completes',async t=>{
+test('six owner-authorized book slots leave a seventh queue intact until a slot completes',async t=>{
   const f=await fixture(t);const tasks=[];
-  for(const [n,id] of [ING1,ING2,ING3,'77777777-aaaa-bbbb-cccc-999999999999'].entries())
+  for(const [n,id] of [ING1,ING2,ING3,...[4,5,6,7].map(n=>'77777777-aaaa-bbbb-cccc-99999999999'+n)].entries())
     tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
-  assert.equal(f.q.activeBooks().length,3);
-  for(let n=0;n<3;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
-  assert.equal(await f.q.claim('desktop'),null,'fourth book is not delivered while three slots are occupied');
+  assert.equal(f.q.activeBooks().length,6);
+  for(let n=0;n<6;n++)await f.deliver(tasks[n],'https://chatgpt.com/c/capacity-'+n);
+  assert.equal(await f.q.claim('desktop'),null,'seventh book is not delivered while six slots are occupied');
   await f.q.modelReport({job_id:tasks[0].job_id,status:'done'});
   await f.activity(tasks[0],'finalized');await f.q.tick();
-  assert.equal((await f.q.claim('desktop')).id,tasks[3].job_id);
+  assert.equal((await f.q.claim('desktop')).id,tasks[6].job_id);
   const persisted=JSON.parse(await readFile(f.file,'utf8'));
-  assert.equal(persisted.book_tasks.length,4,'no book or prompt is discarded to enforce capacity');
+  assert.equal(persisted.book_tasks.length,7,'no book or prompt is discarded to enforce capacity');
 });
