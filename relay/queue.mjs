@@ -262,7 +262,7 @@ export class FileQueue {
           changed=true;
         }
         if(working)continue; // finish this window’s issued turns before its full rest
-        cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
+        cycle.resume_at=lastWork+(35+Math.floor(this.random()*56))*60_000;
         changed=true;
       }
     }
