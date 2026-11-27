@@ -241,6 +241,16 @@ export class FileQueue {
   #advanceBookRest(now) {
     let changed=false;
     for(const [taskId,cycle] of Object.entries(this.#state.book_cycles)) {
+      const task=this.#state.book_tasks.find(task=>task.id===taskId);
+      const job=this.#state.jobs.find(job=>job.id===task?.job_id);
+      const working=task?.state==='active'&&(!job||
+        !(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))&&
+        (task.activity?.state==='processing'||this.#unfinishedBookTurns(task).length>0));
+      const lastWork=Math.max(Date.parse(job?.model_finished_at||job?.reported_at||job?.created_at||''),
+        Date.parse(task?.activity?.last_operation_at||job?.created_at||''));
+      if(!working&&now-lastWork>=90*60_000) { // existing maximum rest was already fully served
+        delete this.#state.book_cycles[taskId];changed=true;continue;
+      }
       if(cycle.resume_at) {
         if(now>=cycle.resume_at) {delete this.#state.book_cycles[taskId];changed=true;}
       } else if(now-cycle.started_at>=BOOK_WORK_MS) {
@@ -251,11 +261,6 @@ export class FileQueue {
           this.#notifyJob(job,'book_rest');
           changed=true;
         }
-        const task=this.#state.book_tasks.find(task=>task.id===taskId);
-        const job=this.#state.jobs.find(job=>job.id===task?.job_id);
-        const working=task?.state==='active'&&(!job||
-          !(task.activity?.state==='finalized'&&this.#bookTurnReleased(job))&&
-          (task.activity?.state==='processing'||this.#unfinishedBookTurns(task).length>0));
         if(working)continue; // finish this window’s issued turns before its full rest
         cycle.resume_at=now+(35+Math.floor(this.random()*56))*60_000;
         changed=true;

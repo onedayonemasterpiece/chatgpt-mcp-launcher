@@ -1083,3 +1083,25 @@ for(const mode of ['pre_send','unknown','foreign_draft','model_started'])test(`b
   assert.equal(replacement.delivery_action,'start');assert.equal(replacement.chat_url,null);
   assert.equal(f.q.status(next.id).status,'blocked','do not invent successful submission');
 });
+
+
+test('a fully idle maximum rest is already served before a delayed scheduler observes the book',async t=>{
+  for(const assigned of [false,true]) await t.test(String(assigned),async t=>{
+    const f=await fixture(t);const first=await f.start();await f.deliver(first);await f.activity(first);
+    await f.q.modelReport({job_id:first.job_id,status:'done'});
+    const saved=JSON.parse(await readFile(f.file,'utf8'));
+    saved.book_cycles[first.job_id]={started_at:f.now()-4*60*60_000,
+      ...(assigned?{resume_at:f.now()+60*60_000}:{})};
+    await writeFile(f.file,JSON.stringify(saved));
+    f.advance(24*60*60_000);
+    // A stale automatic rest can also be assigned only when this slot is re-enabled.
+    if(assigned){saved.book_cycles[first.job_id].resume_at=f.now()+60*60_000;await writeFile(f.file,JSON.stringify(saved));}
+    const restored=new FileQueue(f.file,{desktop:DEVICE},{now:f.now});await restored.initialize();
+    await restored.bookActivity({book_task_id:first.job_id,state:'staged',next_action:'continue_pages',
+      last_operation_at:new Date(f.now()-24*60*60_000).toISOString(),accepted_pages:14,next_cursor:'40'});
+    await restored.tick();
+    const next=await restored.claim('desktop');
+    assert.equal(next?.book_task_id,first.job_id,'full off time must not schedule a second rest');
+    assert.ok(['start','continue'].includes(next?.action),'normal existing continuation or fresh-chat handoff');
+  });
+});
