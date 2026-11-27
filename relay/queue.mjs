@@ -196,7 +196,7 @@ export class FileQueue {
   // silenceMs: no report from the agent for this long after started/progress
   // means "unconfirmed"; confirmMs: the same for a sent prompt never confirmed.
   constructor(file, devices, {now=()=>Date.now(),random=Math.random,silenceMs=30*60_000,confirmMs=10*60_000,seal=null,bookConcurrency=BOOK_CONCURRENCY}={}) {
-    if(!Number.isInteger(bookConcurrency)||bookConcurrency<1||bookConcurrency>BOOK_CONCURRENCY)throw Error('book concurrency must be1–4');
+    if(!Number.isInteger(bookConcurrency)||bookConcurrency<1||bookConcurrency>5)throw Error('book concurrency must be1–5');
     this.bookConcurrency=bookConcurrency;
     this.file = file;
     this.devices = devices;
