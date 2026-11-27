@@ -998,7 +998,7 @@ test('three-hour reader cycle waits for issued work and then gives the full rest
   assert.equal((await f.q.claim('desktop')).book_task_id,first.job_id);
 });
 
-for(const slots of [1,2,4])test(`${slots} staged book slots preserve excess queues until a slot completes`,async t=>{
+for(const slots of [1,2,4,5])test(`${slots} staged book slots preserve excess queues until a slot completes`,async t=>{
   const f=await fixture(t,{bookConcurrency:slots});const tasks=[];
   for(const [n,id] of [ING1,ING2,ING3,...[4,5,6,7].map(n=>'77777777-aaaa-bbbb-cccc-99999999999'+n)].entries())
     tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
