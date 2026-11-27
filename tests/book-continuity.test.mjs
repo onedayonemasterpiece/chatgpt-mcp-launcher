@@ -1047,7 +1047,7 @@ test('a single refusal is retried once; progress after the retry keeps the book 
   assert.equal(f.q.pendingBookNotices().length,0);
 });
 
-for(const slots of [1,2,4])test(`${slots} staged book slots preserve excess queues until a slot completes`,async t=>{
+for(const slots of [1,2,4,5])test(`${slots} staged book slots preserve excess queues until a slot completes`,async t=>{
   const f=await fixture(t,{bookConcurrency:slots});const tasks=[];
   for(const [n,id] of [ING1,ING2,ING3,...[4,5,6,7].map(n=>'77777777-aaaa-bbbb-cccc-99999999999'+n)].entries())
     tasks.push(await f.start([{ingestion_id:id}],'capacity-'+n));
