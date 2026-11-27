@@ -1056,3 +1056,18 @@ test('a fully idle maximum rest is already served before a delayed scheduler obs
     assert.ok(['start','continue'].includes(next?.action),'normal existing continuation or fresh-chat handoff');
   });
 });
+
+
+test('book rest includes an hour already spent waiting for the shared runtime',async t=>{
+  const f=await fixture(t,{random:()=>0});
+  const first=await f.start();await f.deliver(first);
+  await f.q.modelReport({job_id:first.job_id,status:'started'});
+  f.advance(3*60*60_000);
+  await f.q.modelReport({job_id:first.job_id,status:'blocked',summary:'RKB target warming; waiting for service'});
+  const lastWork=new Date(f.now()).toISOString();
+  await f.activity(first,'processing',lastWork,15);await f.q.tick();
+  f.advance(60*60_000);await f.activity(first,'staged',lastWork,15);await f.q.tick();
+  // Existing minute tick expires the rest; the waiting hour already served it.
+  f.advance(60_000);await f.activity(first,'staged',lastWork,15);await f.q.tick();
+  assert.ok(await f.q.claim('desktop'),'do not start another35minutes of rest after an hour idle');
+});
