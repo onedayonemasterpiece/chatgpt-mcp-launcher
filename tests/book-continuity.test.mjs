@@ -1071,3 +1071,22 @@ test('book rest includes an hour already spent waiting for the shared runtime',a
   f.advance(60_000);await f.activity(first,'staged',lastWork,15);await f.q.tick();
   assert.ok(await f.q.claim('desktop'),'do not start another35minutes of rest after an hour idle');
 });
+
+
+test('zero book capacity pauses new delivery and preserves sent jobs and rest clocks',async t=>{
+  const f=await fixture(t,{bookConcurrency:1});
+  const first=await f.start();await f.deliver(first);await f.activity(first);
+  const second=await f.start([{ingestion_id:ING2}],'pause-second');
+  const before=JSON.parse(await readFile(f.file,'utf8'));
+  const paused=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,bookConcurrency:0});
+  await paused.initialize();await paused.tick();
+  assert.deepEqual(paused.activeBooks(),[]);
+  assert.equal(await paused.claim('desktop'),null);
+  assert.equal(paused.status(first.job_id).status,'sent');
+  const after=JSON.parse(await readFile(f.file,'utf8'));
+  assert.deepEqual(after.book_tasks,before.book_tasks);
+  assert.deepEqual(after.book_cycles,before.book_cycles);
+  const resumed=new FileQueue(f.file,{desktop:DEVICE},{now:f.now,bookConcurrency:2});
+  await resumed.initialize();
+  assert.equal((await resumed.claim('desktop')).id,second.job_id);
+});
